@@ -29,12 +29,59 @@ export interface ContentRequest {
   score: number;
   createdAt: number;
   linkCount: number;
+  presence: AtsuPresence | null;
+  /** Atsumaru shows an "Upload this" button on the post: not resolved, with a non-novel MangaBaka link. */
+  uploadable: boolean;
 }
+
+export interface PresenceClaim {
+  commentId: string;
+  user: string;
+  excerpt: string;
+  createdAt: number;
+  /** Set when the comment links an atsu.moe/manga/<id> page. */
+  atsuMangaId: string | null;
+}
+
+/**
+ * Whether a request looks done on Atsumaru even though it isn't tagged "Added":
+ * - on_atsu: the series exists on Atsu with chapters (exact MangaBaka match or a near-exact title)
+ * - claimed: someone commented that they added/are uploading it
+ * - possible: a similar title exists on Atsu, worth a look
+ */
+export interface AtsuPresence {
+  verdict: 'on_atsu' | 'claimed' | 'possible' | 'none';
+  checkedAt: number;
+  commentCount: number;
+  match: {
+    mangaId: string;
+    title: string;
+    chapterCount: number;
+    dateAdded: number | null;
+    score: number;
+    via: 'mangabaka' | 'search' | 'comment';
+  } | null;
+  claims: PresenceClaim[];
+}
+
+export interface RequestComment {
+  id: string;
+  user: string;
+  content: string;
+  createdAt: number;
+  score: number;
+  parentId: string | null;
+  claim: boolean;
+}
+
+/** Scanlation = the group's own site; aggregator = re-hosts other groups' or official releases. */
+export type SourceKind = 'scanlation' | 'aggregator';
 
 export interface SourceInfo {
   id: string;
   name: string;
   baseUrl: string;
+  kind: SourceKind;
   enabled: boolean;
 }
 
@@ -61,11 +108,14 @@ export interface SourceSeries {
   cover?: string;
   description?: string;
   chapters: SourceChapter[];
+  /** Why `chapters` is empty when the site has the series but nothing usable, e.g. "no English chapters". */
+  emptyReason?: string;
 }
 
 export interface SourceMatch {
   sourceId: string;
   sourceName: string;
+  sourceKind: SourceKind;
   seriesUrl: string;
   title: string;
   cover: string | null;
@@ -106,7 +156,8 @@ export interface AtsuSeriesState {
 /** Whether chapter `n` falls inside any inclusive [from, to] range. */
 export const inRanges = (n: number, ranges: [number, number][]) => ranges.some(([a, b]) => n >= a && n <= b);
 
-export type ChapterState = 'known' | 'pending' | 'queued' | 'uploaded' | 'skipped';
+/** `downloaded` = ZIP ready, waiting for the user to upload it on atsu.moe; `uploaded` = the user confirmed it. */
+export type ChapterState = 'known' | 'pending' | 'queued' | 'downloaded' | 'uploaded' | 'skipped';
 
 export interface LinkChapter {
   id: number;
@@ -125,6 +176,7 @@ export interface Link {
   requestTitle: string;
   sourceId: string;
   sourceName: string;
+  sourceKind: SourceKind;
   seriesUrl: string;
   seriesTitle: string;
   atsuMangaId: string | null;
@@ -136,9 +188,10 @@ export interface Link {
   chapterCount: number;
 }
 
-export type JobState = 'queued' | 'downloading' | 'uploading' | 'submitting' | 'done' | 'failed' | 'cancelled';
+export type JobState = 'queued' | 'downloading' | 'done' | 'failed' | 'cancelled';
 
-export interface UploadJob {
+/** A chapter being fetched from its source and bundled into a ZIP for manual upload. */
+export interface DownloadJob {
   id: number;
   linkId: number;
   chapterId: number;
@@ -148,19 +201,19 @@ export interface UploadJob {
   state: JobState;
   progress: number;
   total: number;
-  dryRun: boolean;
   error: string | null;
   log: string[];
   createdAt: number;
   updatedAt: number;
+  /** Size of the finished ZIP; null until the job is done. */
+  fileSize: number | null;
+  /** Atsumaru's upload page, pre-selecting the series when its MangaBaka id is known. */
+  uploadUrl: string;
 }
 
 export interface Settings {
   atsuCookie: string;
-  dryRun: boolean;
   defaultCheckIntervalMin: number;
-  /** Atsumaru upload group to publish under; empty = "Just me". */
-  atsuGroupId: string;
 }
 
 export interface SettingsView extends Omit<Settings, 'atsuCookie'> {
@@ -169,6 +222,6 @@ export interface SettingsView extends Omit<Settings, 'atsuCookie'> {
 }
 
 export type ServerEvent =
-  | { type: 'job'; job: UploadJob }
+  | { type: 'job'; job: DownloadJob }
   | { type: 'new_chapters'; linkId: number; seriesTitle: string; labels: string[] }
   | { type: 'requests_synced'; added: number };

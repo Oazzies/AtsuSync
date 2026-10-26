@@ -2,6 +2,9 @@ import { createApp } from 'vue';
 import { createRouter, createWebHistory } from 'vue-router';
 import App from './App.vue';
 import './style.css';
+import 'vue-sonner/style.css';
+
+document.documentElement.classList.add('dark');
 
 const router = createRouter({
   history: createWebHistory(),
@@ -10,7 +13,7 @@ const router = createRouter({
     { path: '/requests/:id', name: 'request', component: () => import('./views/RequestDetailView.vue'), props: true },
     { path: '/links/:id', name: 'link', component: () => import('./views/LinkView.vue'), props: (r) => ({ id: Number(r.params.id) }) },
     { path: '/tracked', name: 'tracked', component: () => import('./views/TrackedView.vue') },
-    { path: '/uploads', name: 'uploads', component: () => import('./views/UploadsView.vue') },
+    { path: '/downloads', name: 'downloads', component: () => import('./views/DownloadsView.vue') },
     { path: '/sources', name: 'sources', component: () => import('./views/SourcesView.vue') },
     { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue') },
   ],

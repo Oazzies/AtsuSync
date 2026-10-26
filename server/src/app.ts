@@ -1,11 +1,12 @@
-import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { createReadStream, existsSync } from 'node:fs';
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
-import type { ContentRequest, Settings, SettingsView } from '@atsusync/shared';
+import type { ContentRequest, RequestComment, Settings, SettingsView } from '@atsusync/shared';
 import { AtsuClient, emptySeriesState } from './atsu/client.ts';
 import { RequestsRepo, syncRequests } from './atsu/requests.ts';
 import { getMangaBakaSeries } from './atsu/mangabaka.ts';
+import { PresenceChecker, toRequestComment } from './atsu/presence.ts';
 import { openDb, type Db } from './db/client.ts';
 import { events } from './events.ts';
 import { LinksRepo } from './links.ts';
@@ -14,11 +15,13 @@ import { Discovery } from './sources/discovery.ts';
 import { SourceRegistry } from './sources/registry.ts';
 import { SourceHttp } from './sources/http.ts';
 import type { SourceAdapter } from './sources/types.ts';
-import { UploadPipeline } from './upload/pipeline.ts';
+import { DownloadPipeline } from './upload/pipeline.ts';
 import { Watcher } from './watcher/watcher.ts';
 
 export interface AppOptions {
   dbFile: string;
+  /** Where chapter ZIPs are written; defaults to `downloads/` next to the database. */
+  downloadsDir?: string;
   webDist?: string;
   adapters?: SourceAdapter[];
   fetchImpl?: typeof fetch;
@@ -33,8 +36,9 @@ export function buildApp(opts: AppOptions) {
   const sources = new SourceRegistry(db, opts.adapters, new SourceHttp(opts.fetchImpl));
   const discovery = new Discovery(db, sources);
   const links = new LinksRepo(db, sources);
-  const pipeline = new UploadPipeline(db, links, sources, atsu, settings);
+  const pipeline = new DownloadPipeline(db, links, sources, opts.downloadsDir ?? join(dirname(opts.dbFile), 'downloads'));
   const watcher = new Watcher(links, sources, atsu);
+  const presence = new PresenceChecker(atsu, requests);
 
   const app = Fastify({ logger: { level: 'info', transport: undefined } });
 
@@ -60,17 +64,13 @@ export function buildApp(opts: AppOptions) {
     return settingsView();
   });
 
-  app.get('/api/atsu/groups', async () => {
-    const w = (await atsu.getUploadWorkspace()) as { groups?: { id: string; name: string }[]; canPublish?: boolean };
-    return { groups: (w.groups ?? []).map((g) => ({ id: g.id, name: g.name })), canPublish: !!w.canPublish };
-  });
-
   // ---- Requests ----
   let syncing: Promise<unknown> | null = null;
   const runSync = (full: boolean) => {
     syncing ??= syncRequests(atsu, requests, db, { full })
       .then((r) => {
         events.emitEvent({ type: 'requests_synced', added: r.added });
+        void presence.tick();
         return r;
       })
       .finally(() => (syncing = null));
@@ -80,13 +80,19 @@ export function buildApp(opts: AppOptions) {
   app.post<{ Querystring: { full?: string } }>('/api/requests/sync', async (req) => runSync(req.query.full === '1'));
   app.get<{ Params: { id: string } }>('/api/requests/:id', async (req) => {
     // Refresh this one post so status tags are current when looking at it.
-    const fresh = await atsu.getPost(req.params.id).catch(() => null);
-    const post = fresh?.post ?? (fresh?.id ? fresh : null);
-    if (post && post.id && post.createdAt) requests.upsertPost(post as Parameters<typeof requests.upsertPost>[0]);
+    const post = await atsu.getPost(req.params.id).catch(() => null);
+    if (post?.id && post.createdAt) requests.upsertPost(post);
     const r = mustRequest(req.params.id);
     const mangabaka = r.mangabakaId ? await getMangaBakaSeries(r.mangabakaId).catch(() => null) : null;
     return { request: r, mangabaka, matches: discovery.cached(r.id), links: links.list({ requestId: r.id }) };
   });
+  app.get<{ Params: { id: string } }>('/api/requests/:id/comments', async (req): Promise<RequestComment[]> => {
+    const r = mustRequest(req.params.id);
+    const sectionId = requests.sectionId(r.id);
+    if (!sectionId) return [];
+    return (await atsu.getComments(sectionId)).map(toRequestComment);
+  });
+  app.post<{ Params: { id: string } }>('/api/requests/:id/presence', async (req) => presence.check(mustRequest(req.params.id)));
   app.get<{ Params: { id: string } }>('/api/requests/:id/atsu', async (req) => {
     const r = mustRequest(req.params.id);
     const linked = links.list({ requestId: r.id }).find((l) => l.atsuMangaId);
@@ -144,21 +150,29 @@ export function buildApp(opts: AppOptions) {
     const added = await watcher.check(link);
     return { added: added.length, link: links.get(link.id) };
   });
-  app.post<{ Body: { chapterIds: number[]; state: 'skipped' | 'known' | 'pending' } }>('/api/chapters/state', async (req) => {
+  app.post<{ Body: { chapterIds: number[]; state: 'skipped' | 'known' | 'pending' | 'uploaded' } }>('/api/chapters/state', async (req) => {
     links.setChapterState(req.body.chapterIds, req.body.state);
     return { ok: true };
   });
 
-  // ---- Uploads ----
-  app.get('/api/uploads', async () => pipeline.list());
-  app.post<{ Body: { chapterIds: number[] } }>('/api/uploads', async (req) => pipeline.enqueue(req.body.chapterIds));
-  app.post<{ Params: { id: string } }>('/api/uploads/:id/retry', async (req) => {
+  // ---- Downloads (chapter ZIPs the user uploads to atsu.moe by hand) ----
+  app.get('/api/downloads', async () => pipeline.list());
+  app.post<{ Body: { chapterIds: number[] } }>('/api/downloads', async (req) => pipeline.enqueue(req.body.chapterIds));
+  app.post<{ Params: { id: string } }>('/api/downloads/:id/retry', async (req) => {
     pipeline.retry(Number(req.params.id));
     return pipeline.get(Number(req.params.id));
   });
-  app.post<{ Params: { id: string } }>('/api/uploads/:id/cancel', async (req) => {
+  app.post<{ Params: { id: string } }>('/api/downloads/:id/cancel', async (req) => {
     pipeline.cancel(Number(req.params.id));
     return pipeline.get(Number(req.params.id));
+  });
+  app.get<{ Params: { id: string } }>('/api/downloads/:id/file', async (req, reply) => {
+    const file = pipeline.file(Number(req.params.id));
+    if (!file) throw Object.assign(new Error('That download is not ready (or the file was deleted). Download it again.'), { statusCode: 404 });
+    return reply
+      .header('content-type', 'application/zip')
+      .header('content-disposition', `attachment; filename="${file.name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(file.name)}`)
+      .send(createReadStream(file.path));
   });
 
   // ---- Live events (SSE) ----
@@ -186,17 +200,22 @@ export function buildApp(opts: AppOptions) {
   app.addHook('onReady', async () => {
     if (opts.background === false) return;
     watcher.start();
+    presence.start();
     pipeline.pump();
-    void runSync(false).catch((e) => app.log.warn(`Request sync failed: ${e.message}`));
-    syncTimer = setInterval(() => void runSync(false).catch(() => {}), 15 * 60_000);
+    void runSync(true).catch((e) => app.log.warn(`Request sync failed: ${e.message}`));
+    // A quick sync only sees new posts; status tags (Added, Duplicate…) change on old ones, which
+    // is what removes a post's upload button, so walk the whole forum (~15 pages) every few hours.
+    let ticks = 0;
+    syncTimer = setInterval(() => void runSync(++ticks % 12 === 0).catch(() => {}), 15 * 60_000);
   });
   app.addHook('onClose', async () => {
     watcher.stop();
+    presence.stop();
     if (syncTimer) clearInterval(syncTimer);
     db.close();
   });
 
-  return { app, db, settings, atsu, requests, sources, discovery, links, pipeline, watcher };
+  return { app, db, settings, atsu, requests, sources, discovery, links, pipeline, watcher, presence };
 }
 
 export const defaultWebDist = join(import.meta.dirname, '../../web/dist');

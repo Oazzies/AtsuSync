@@ -4,3 +4,4 @@ data/
 .env
 *.log
 .claude/launch.json
+data-verify/

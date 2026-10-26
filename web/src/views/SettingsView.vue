@@ -1,42 +1,44 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
+import { toast } from 'vue-sonner';
+import { CircleCheck, CircleAlert } from 'lucide-vue-next';
 import type { SettingsView } from '@atsusync/shared';
-import { api } from '../api/client';
+import { api } from '@/api/client';
+import PageHeader from '@/components/PageHeader.vue';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
+import { tone } from '@/lib/tone';
 
 const emit = defineEmits<{ changed: [] }>();
 const s = ref<SettingsView | null>(null);
 const cookie = ref('');
-const msg = ref<string | null>(null);
 const saving = ref(false);
-const groups = ref<{ id: string; name: string }[]>([]);
-const canPublish = ref<boolean | null>(null);
+
+const INTERVALS = [15, 30, 60, 120, 360, 720, 1440];
+const fmtInterval = (m: number) => (m < 60 ? `${m} min` : `${m / 60} h`);
 
 async function load() {
   s.value = await api.settings();
-  if (s.value.atsuUser) {
-    const g = await api.atsuGroups().catch(() => null);
-    groups.value = g?.groups ?? [];
-    canPublish.value = g?.canPublish ?? null;
-  }
 }
 
 async function save() {
   if (!s.value) return;
   saving.value = true;
-  msg.value = null;
   try {
     s.value = await api.saveSettings({
-      dryRun: s.value.dryRun,
       defaultCheckIntervalMin: Number(s.value.defaultCheckIntervalMin),
-      atsuGroupId: s.value.atsuGroupId,
       ...(cookie.value.trim() ? { atsuCookie: cookie.value.trim() } : {}),
     });
     cookie.value = '';
-    msg.value = 'Saved.';
     await load();
+    toast.success('Settings saved');
     emit('changed');
   } catch (e) {
-    msg.value = (e as Error).message;
+    toast.error((e as Error).message);
   } finally {
     saving.value = false;
   }
@@ -44,56 +46,56 @@ async function save() {
 
 async function clearCookie() {
   s.value = await api.saveSettings({ atsuCookie: '' });
+  emit('changed');
 }
 
 onMounted(load);
 </script>
 
 <template>
-  <div v-if="s" class="stack" style="max-width: 720px">
-    <h1>Settings</h1>
+  <div v-if="s" class="max-w-2xl space-y-6">
+    <PageHeader title="Settings" />
 
-    <div class="panel stack">
-      <h2>Atsumaru session</h2>
-      <div class="row">
-        <span v-if="s.atsuUser" class="badge ok">Logged in as {{ s.atsuUser }}</span>
-        <span v-else-if="s.atsuCookieSet" class="badge err">Cookie set but not accepted — it may have expired</span>
-        <span v-else class="badge warn">Not set</span>
-        <button v-if="s.atsuCookieSet" class="ghost danger" @click="clearCookie">Clear</button>
-      </div>
-      <div class="muted small">
-        Log in on atsu.moe in your browser, open DevTools → Network, click any <code>/api/</code> request and copy the whole
-        <code>cookie</code> request header. It is stored only in the local database and never shown again here.
-      </div>
-      <textarea v-model="cookie" rows="3" placeholder="Paste cookie header…" />
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle class="flex items-center gap-2">
+          Atsumaru session
+          <Badge v-if="s.atsuUser" variant="outline" :class="tone('success')"><CircleCheck class="size-3" /> {{ s.atsuUser }}</Badge>
+          <Badge v-else-if="s.atsuCookieSet" variant="outline" :class="tone('danger')"><CircleAlert class="size-3" /> Cookie rejected</Badge>
+          <Badge v-else variant="outline" :class="tone('warning')">Not set</Badge>
+        </CardTitle>
+        <CardDescription>
+          On atsu.moe press F12 → Network, refresh, click any <code>/api/</code> request and copy the whole <code>cookie</code> request
+          header. It's stored only in the local database.
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="space-y-2">
+        <Textarea v-model="cookie" rows="3" placeholder="Paste cookie header…" class="font-mono text-xs" />
+        <Button v-if="s.atsuCookieSet" variant="ghost" size="sm" class="text-destructive" @click="clearCookie">Clear saved cookie</Button>
+      </CardContent>
+    </Card>
 
-    <div class="panel stack">
-      <h2>Uploading</h2>
-      <label class="row">
-        <input v-model="s.dryRun" type="checkbox" />
-        <span><strong>Dry run</strong> — download and hash pages, but don't send anything to Atsumaru.</span>
-      </label>
-      <label class="stack" style="gap: 4px">
-        <span class="small muted">Upload as</span>
-        <select v-model="s.atsuGroupId">
-          <option value="">Just me</option>
-          <option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</option>
-        </select>
-        <span v-if="!s.atsuUser" class="small muted">Set the cookie first to load your Atsumaru groups.</span>
-        <span v-else-if="canPublish === false" class="small muted">Your uploads go to Atsumaru's review queue before they're published.</span>
-      </label>
-      <label class="stack" style="gap: 4px">
-        <span class="small muted">Default check interval for new links</span>
-        <select v-model.number="s.defaultCheckIntervalMin">
-          <option v-for="m in [15, 30, 60, 120, 360, 720, 1440]" :key="m" :value="m">{{ m < 60 ? `${m} min` : `${m / 60} h` }}</option>
-        </select>
-      </label>
-    </div>
-
-    <div class="row">
-      <button class="primary" :disabled="saving" @click="save">Save</button>
-      <span v-if="msg" class="small">{{ msg }}</span>
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle>Defaults</CardTitle>
+        <CardDescription>
+          Chapters are downloaded as ZIPs; you upload them yourself on atsu.moe. AtsuSync never submits anything for you.
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="space-y-5">
+        <div class="space-y-1.5">
+          <Label>Default check interval for new links</Label>
+          <Select :model-value="String(s.defaultCheckIntervalMin)" @update:model-value="(v) => (s!.defaultCheckIntervalMin = Number(v))">
+            <SelectTrigger class="w-40"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="m in INTERVALS" :key="m" :value="String(m)">{{ fmtInterval(m) }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </CardContent>
+      <CardFooter>
+        <Button :disabled="saving" @click="save">{{ saving ? 'Saving…' : 'Save' }}</Button>
+      </CardFooter>
+    </Card>
   </div>
 </template>

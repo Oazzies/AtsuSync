@@ -179,18 +179,16 @@ export class LinksRepo {
   }
 
   private toLink(r: LinkRow): Link {
-    let sourceName = r.source_id;
-    try {
-      sourceName = this.sources.get(r.source_id).name;
-    } catch {
-      /* adapter removed */
-    }
+    const adapter = this.sources.find(r.source_id);
+    const sourceName = adapter?.name ?? r.source_id;
+    const sourceKind = adapter?.kind ?? 'scanlation';
     return {
       id: r.id,
       requestId: r.request_id,
       requestTitle: r.request_title,
       sourceId: r.source_id,
       sourceName,
+      sourceKind,
       seriesUrl: r.series_url,
       seriesTitle: r.series_title,
       atsuMangaId: r.atsu_manga_id,

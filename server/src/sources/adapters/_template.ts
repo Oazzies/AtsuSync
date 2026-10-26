@@ -17,6 +17,7 @@ export const template: SourceAdapter = {
   id: 'example',
   name: 'Example Scans',
   baseUrl: BASE,
+  kind: 'scanlation',
   hosts: ['example-scans.com'],
   rateLimit: { rpm: 20, concurrency: 1 },
 

@@ -1,31 +1,32 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { ChapterState, JobState, RequestStatus } from '@atsusync/shared';
+import { Badge } from '@/components/ui/badge';
+import { tone, type Tone } from '@/lib/tone';
 
 const props = defineProps<{ status: RequestStatus | ChapterState | JobState }>();
 
-const MAP: Record<string, [string, string]> = {
+const MAP: Record<string, [string, Tone]> = {
   open: ['Open', 'info'],
-  queued: ['Queued', 'warn'],
-  looking: ['Looking into it', 'warn'],
-  added: ['Added', 'ok'],
-  cant_add: ["Can't add", 'err'],
-  duplicate: ['Duplicate', ''],
-  known: ['Available', ''],
-  pending: ['New', 'accent'],
-  uploaded: ['Uploaded', 'ok'],
-  skipped: ['Skipped', ''],
+  queued: ['Queued', 'warning'],
+  looking: ['Looking into it', 'warning'],
+  added: ['Added', 'success'],
+  cant_add: ["Can't add", 'danger'],
+  duplicate: ['Duplicate', 'neutral'],
+  known: ['Available', 'neutral'],
+  pending: ['New', 'primary'],
+  downloaded: ['Downloaded', 'primary'],
+  uploaded: ['Uploaded', 'success'],
+  skipped: ['Skipped', 'neutral'],
   downloading: ['Downloading', 'info'],
-  uploading: ['Uploading', 'info'],
-  submitting: ['Submitting', 'info'],
-  done: ['Done', 'ok'],
-  failed: ['Failed', 'err'],
-  cancelled: ['Cancelled', ''],
+  done: ['Ready', 'success'],
+  failed: ['Failed', 'danger'],
+  cancelled: ['Cancelled', 'neutral'],
 };
 
-const entry = computed(() => MAP[props.status] ?? [props.status, '']);
+const entry = computed((): [string, Tone] => MAP[props.status] ?? [props.status, 'neutral']);
 </script>
 
 <template>
-  <span class="badge" :class="entry[1]">{{ entry[0] }}</span>
+  <Badge variant="outline" :class="tone(entry[1])">{{ entry[0] }}</Badge>
 </template>

@@ -90,4 +90,18 @@ export const migrations: string[] = [
   `
   ALTER TABLE upload_jobs ADD COLUMN prev_chapter_state TEXT NOT NULL DEFAULT 'known';
   `,
+  `
+  ALTER TABLE requests ADD COLUMN section_id TEXT;
+  ALTER TABLE requests ADD COLUMN presence_json TEXT;
+  ALTER TABLE requests ADD COLUMN presence_checked_at INTEGER;
+  `,
+  `
+  -- Jobs now produce a ZIP for manual upload instead of calling Atsumaru.
+  ALTER TABLE upload_jobs ADD COLUMN file_path TEXT;
+  ALTER TABLE upload_jobs ADD COLUMN file_size INTEGER;
+  `,
+  `
+  -- Sites that know a series but have no chapters to upload are no longer listed.
+  DELETE FROM source_matches WHERE chapter_count = 0 AND error IS NULL;
+  `,
 ];

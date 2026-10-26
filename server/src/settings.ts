@@ -4,14 +4,11 @@ import type { Db } from './db/client.ts';
 export const config = {
   port: Number(process.env.PORT ?? 4517),
   dataDir: process.env.DATA_DIR ?? './data',
-  dryRunDefault: (process.env.DRY_RUN ?? 'true') !== 'false',
 };
 
 const defaults = (): Settings => ({
   atsuCookie: '',
-  dryRun: config.dryRunDefault,
   defaultCheckIntervalMin: 60,
-  atsuGroupId: '',
 });
 
 export class SettingsStore {

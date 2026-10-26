@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AtsuClient, parseSeriesState, type AtsuPostsPage } from '../src/atsu/client.ts';
 import { parseMangaBaka } from '../src/atsu/mangabaka.ts';
-import { RequestsRepo, parseTrackers, statusFromTags, syncRequests } from '../src/atsu/requests.ts';
+import { RequestsRepo, isUploadable, parseTrackers, statusFromTags, syncRequests, uploadMangaBakaId } from '../src/atsu/requests.ts';
 import { openDb } from '../src/db/client.ts';
 import { bestScore, searchQueries } from '../src/sources/match.ts';
 
@@ -42,6 +42,25 @@ describe('content request parsing', () => {
       secondary_titles: { unknown: [{ title: '恋上你的声音' }] },
     })!;
     expect(mb.titles).toEqual(['The Sound of Your Voice', 'Moksorireul Deullyeojuseyo', '목소리를 들려주세요', '恋上你的声音']);
+  });
+});
+
+describe('upload button rule', () => {
+  it('takes the first non-novel mangabaka link with a type segment, like atsu.moe', () => {
+    expect(uploadMangaBakaId('see https://mangabaka.org/manhwa/123/some-title')).toBe('123');
+    expect(uploadMangaBakaId('https://mangabaka.org/novel/9/x and https://mangabaka.dev/manga/42')).toBe('42');
+    expect(uploadMangaBakaId('https://mangabaka.org/novel/9/x')).toBeNull();
+    expect(uploadMangaBakaId('https://mangabaka.org/123')).toBeNull(); // no type segment → no button
+    expect(uploadMangaBakaId('https://anilist.co/manga/1')).toBeNull();
+  });
+
+  it('is off for resolved posts and posts without a usable tracker link', () => {
+    const body = 'https://mangabaka.org/manga/5';
+    expect(isUploadable('open', body)).toBe(true);
+    expect(isUploadable('queued', body)).toBe(true);
+    expect(isUploadable('looking', body)).toBe(true);
+    for (const s of ['added', 'cant_add', 'duplicate'] as const) expect(isUploadable(s, body)).toBe(false);
+    expect(isUploadable('open', 'no links here')).toBe(false);
   });
 });
 

@@ -1,4 +1,4 @@
-import type { ContentRequest, RequestStatus, RequestTag, TrackerLink } from '@atsusync/shared';
+import type { AtsuPresence, ContentRequest, RequestStatus, RequestTag, TrackerLink } from '@atsusync/shared';
 import type { Db } from '../db/client.ts';
 import { tx } from '../db/client.ts';
 import { ATSU_BASE, CONTENT_REQUESTS_PATH, type AtsuClient, type AtsuPost } from './client.ts';
@@ -51,7 +51,22 @@ export function parseTrackers(content: string): TrackerLink[] {
   return out;
 }
 
-export const postUrl = (id: string) => `${ATSU_BASE}${CONTENT_REQUESTS_PATH}/${id}`;
+const SITE_MANGABAKA_LINK = /mangabaka\.(?:org|dev)\/([a-z-]+)\/(\d+)/gi;
+const TERMINAL_STATUSES: RequestStatus[] = ['added', 'cant_add', 'duplicate'];
+
+/**
+ * The MangaBaka id behind a post's "Upload this" button. Mirrors atsu.moe's own check: the
+ * first MangaBaka link of the form `/<type>/<id>` whose type isn't `novel`.
+ */
+export function uploadMangaBakaId(content: string): string | null {
+  for (const m of content.matchAll(SITE_MANGABAKA_LINK)) if (m[1]!.toLowerCase() !== 'novel') return m[2]!;
+  return null;
+}
+
+/** Atsumaru only shows "Upload this" on posts without a terminal tag (Added / Can't add / Duplicate). */
+export const isUploadable = (status: RequestStatus, content: string) => !TERMINAL_STATUSES.includes(status) && uploadMangaBakaId(content) !== null;
+
+export const postUrl =(id: string) => `${ATSU_BASE}${CONTENT_REQUESTS_PATH}/${id}`;
 
 interface RequestRow {
   id: string;
@@ -66,6 +81,8 @@ interface RequestRow {
   comment_count: number;
   score: number;
   created_at: number;
+  section_id: string | null;
+  presence_json: string | null;
   link_count?: number;
 }
 
@@ -85,6 +102,8 @@ function rowToRequest(r: RequestRow): ContentRequest {
     score: r.score,
     createdAt: r.created_at,
     linkCount: r.link_count ?? 0,
+    presence: r.presence_json ? (JSON.parse(r.presence_json) as AtsuPresence) : null,
+    uploadable: isUploadable(r.status, r.content),
   };
 }
 
@@ -99,12 +118,12 @@ export class RequestsRepo {
     this.db
       .prepare(
         `INSERT INTO requests (id, title, content, author_name, tags_json, status, kind, trackers_json, mangabaka_id,
-           comment_count, score, created_at, synced_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           comment_count, score, created_at, synced_at, section_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, tags_json = excluded.tags_json,
            status = excluded.status, kind = excluded.kind, trackers_json = excluded.trackers_json,
            mangabaka_id = excluded.mangabaka_id, comment_count = excluded.comment_count, score = excluded.score,
-           synced_at = excluded.synced_at`,
+           synced_at = excluded.synced_at, section_id = COALESCE(excluded.section_id, requests.section_id)`,
       )
       .run(
         p.id,
@@ -120,8 +139,32 @@ export class RequestsRepo {
         p.score ?? 0,
         p.createdAt,
         Date.now(),
+        p.sectionId ?? null,
       );
     return existed ? 'updated' : 'inserted';
+  }
+
+  sectionId(id: string): string | null {
+    const r = this.db.prepare('SELECT section_id FROM requests WHERE id = ?').get(id) as { section_id: string | null } | undefined;
+    return r?.section_id ?? null;
+  }
+
+  setPresence(id: string, p: AtsuPresence) {
+    this.db.prepare('UPDATE requests SET presence_json = ?, presence_checked_at = ? WHERE id = ?').run(JSON.stringify(p), p.checkedAt, id);
+  }
+
+  /** Unresolved requests whose presence check is missing, stale, or predates new comments. */
+  dueForPresenceCheck(maxAgeMs: number, limit: number): ContentRequest[] {
+    const rows = this.db
+      .prepare(
+        `SELECT r.*, 0 AS link_count FROM requests r
+         WHERE r.status IN ('open', 'queued', 'looking')
+           AND (r.presence_checked_at IS NULL OR r.presence_checked_at < ?
+                OR r.comment_count <> COALESCE(json_extract(r.presence_json, '$.commentCount'), -1))
+         ORDER BY r.presence_checked_at IS NOT NULL, r.created_at DESC LIMIT ?`,
+      )
+      .all(Date.now() - maxAgeMs, limit) as unknown as RequestRow[];
+    return rows.map(rowToRequest);
   }
 
   remove(id: string) {

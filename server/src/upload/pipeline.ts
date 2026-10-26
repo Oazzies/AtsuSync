@@ -1,11 +1,12 @@
-import { createHash } from 'node:crypto';
-import type { ChapterState, JobState, UploadJob } from '@atsusync/shared';
-import type { AtsuClient } from '../atsu/client.ts';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { ChapterState, DownloadJob, JobState } from '@atsusync/shared';
+import { uploadMangaBakaId } from '../atsu/requests.ts';
 import type { Db } from '../db/client.ts';
 import { events } from '../events.ts';
 import type { LinksRepo } from '../links.ts';
-import type { SettingsStore } from '../settings.ts';
 import type { SourceRegistry } from '../sources/registry.ts';
+import { createZip } from './zip.ts';
 
 interface JobRow {
   id: number;
@@ -14,30 +15,36 @@ interface JobRow {
   state: JobState;
   progress: number;
   total: number;
-  dry_run: number;
-  draft_id: string | null;
-  prev_chapter_state: ChapterState;
   error: string | null;
   log_json: string;
+  file_path: string | null;
+  file_size: number | null;
   created_at: number;
   updated_at: number;
   chapter_label: string;
   series_title: string;
   source_id: string;
+  content: string;
+  mangabaka_id: string | null;
 }
 
 const JOB_SELECT = `
-  SELECT j.*, c.label AS chapter_label, l.series_title, l.source_id
-  FROM upload_jobs j JOIN source_chapters c ON c.id = j.chapter_id JOIN links l ON l.id = j.link_id`;
+  SELECT j.*, c.label AS chapter_label, l.series_title, l.source_id, r.content, r.mangabaka_id
+  FROM upload_jobs j JOIN source_chapters c ON c.id = j.chapter_id JOIN links l ON l.id = j.link_id JOIN requests r ON r.id = l.request_id`;
 
-const ACTIVE: JobState[] = ['queued', 'downloading', 'uploading', 'submitting'];
+const ACTIVE: JobState[] = ['queued', 'downloading'];
+const PAGE_PARALLELISM = 6;
+
+/** Strip characters Windows/macOS/Linux reject in file names. */
+const safeName = (s: string) => s.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '').slice(0, 80) || 'untitled';
 
 /**
- * Upload queue persisted in SQLite: download → hash → create draft → PUT pages → submit.
- * Runs at most `concurrency` jobs at once and never two for the same link, so chapters of
- * a series go up in order. In dry-run mode every Atsumaru write call is skipped and logged.
+ * Download queue persisted in SQLite: resolve pages → download → bundle into a ZIP under
+ * `<dir>/<series>/`. Nothing is ever sent to Atsumaru; the user uploads the ZIP by hand on
+ * atsu.moe/upload. Runs at most `concurrency` jobs and never two for the same link, so a
+ * series' chapters finish in order.
  */
-export class UploadPipeline {
+export class DownloadPipeline {
   private running = new Set<number>();
   private busyLinks = new Set<number>();
   private cancelled = new Set<number>();
@@ -46,25 +53,36 @@ export class UploadPipeline {
     private db: Db,
     private links: LinksRepo,
     private sources: SourceRegistry,
-    private atsu: AtsuClient,
-    private settings: SettingsStore,
+    private dir: string,
     private concurrency = 2,
   ) {
     // Jobs interrupted by a restart go back to the queue.
-    this.db.prepare(`UPDATE upload_jobs SET state = 'queued', progress = 0 WHERE state IN ('downloading','uploading','submitting')`).run();
+    this.db.prepare(`UPDATE upload_jobs SET state = 'queued', progress = 0 WHERE state NOT IN ('queued','done','failed','cancelled')`).run();
   }
 
-  list(limit = 200): UploadJob[] {
+  list(limit = 200): DownloadJob[] {
     return (this.db.prepare(`${JOB_SELECT} ORDER BY j.id DESC LIMIT ?`).all(limit) as unknown as JobRow[]).map((r) => this.toJob(r));
   }
 
-  get(id: number): UploadJob | null {
+  get(id: number): DownloadJob | null {
     const r = this.db.prepare(`${JOB_SELECT} WHERE j.id = ?`).get(id) as unknown as JobRow | undefined;
     return r ? this.toJob(r) : null;
   }
 
-  enqueue(chapterIds: number[]): UploadJob[] {
-    const dryRun = this.settings.get().dryRun;
+  /** The ZIP on disk for a finished job, with the name to offer in the browser. */
+  file(id: number): { path: string; name: string } | null {
+    const job = this.get(id);
+    const row = this.db.prepare('SELECT file_path FROM upload_jobs WHERE id = ?').get(id) as { file_path: string | null } | undefined;
+    if (!job || job.state !== 'done' || !row?.file_path) return null;
+    try {
+      statSync(row.file_path);
+    } catch {
+      return null;
+    }
+    return { path: row.file_path, name: `${safeName(job.seriesTitle)} - ${safeName(job.chapterLabel)}.zip` };
+  }
+
+  enqueue(chapterIds: number[]): DownloadJob[] {
     const created: number[] = [];
     for (const chapterId of chapterIds) {
       const ch = this.links.chapter(chapterId);
@@ -78,9 +96,9 @@ export class UploadPipeline {
       const res = this.db
         .prepare(
           `INSERT INTO upload_jobs (link_id, chapter_id, state, dry_run, prev_chapter_state, created_at, updated_at)
-           VALUES (?, ?, 'queued', ?, ?, ?, ?)`,
+           VALUES (?, ?, 'queued', 0, ?, ?, ?)`,
         )
-        .run(ch.link_id, chapterId, dryRun ? 1 : 0, ch.state === 'queued' ? 'known' : ch.state, now, now);
+        .run(ch.link_id, chapterId, ch.state === 'queued' ? 'known' : ch.state, now, now);
       this.links.setChapterState([chapterId], 'queued');
       created.push(Number(res.lastInsertRowid));
     }
@@ -93,9 +111,7 @@ export class UploadPipeline {
   retry(id: number) {
     const job = this.get(id);
     if (!job || (job.state !== 'failed' && job.state !== 'cancelled')) return;
-    this.db
-      .prepare(`UPDATE upload_jobs SET state = 'queued', progress = 0, error = NULL, dry_run = ?, updated_at = ? WHERE id = ?`)
-      .run(this.settings.get().dryRun ? 1 : 0, Date.now(), id);
+    this.db.prepare(`UPDATE upload_jobs SET state = 'queued', progress = 0, error = NULL, updated_at = ? WHERE id = ?`).run(Date.now(), id);
     this.links.setChapterState([job.chapterId], 'queued');
     this.emit(id);
     this.pump();
@@ -131,11 +147,9 @@ export class UploadPipeline {
     const chapter = this.links.chapter(job.chapterId)!;
     const link = this.links.get(job.linkId)!;
     const adapter = this.sources.get(link.sourceId);
-    const settings = this.settings.get();
     const checkCancel = () => {
       if (this.cancelled.has(id)) throw new CancelError();
     };
-    let draft: string | null = null;
 
     try {
       this.setState(id, 'downloading', `Resolving pages for ${chapter.label} from ${adapter.name}`);
@@ -145,77 +159,51 @@ export class UploadPipeline {
       );
       this.update(id, { total: pages.length, progress: 0 });
 
-      const files: { name: string; sha256: string; bytes: Uint8Array }[] = [];
-      for (const [i, p] of pages.entries()) {
-        checkCancel();
-        const { bytes } = await this.sources.http.bytes(p.url, { headers: p.headers });
-        if (bytes.length < 1024) throw new Error(`Page ${p.name} looks empty (${bytes.length} bytes)`);
-        files.push({ name: p.name, sha256: createHash('sha256').update(bytes).digest('hex'), bytes });
-        this.update(id, { progress: i + 1 });
-      }
-      const totalMb = files.reduce((n, f) => n + f.bytes.length, 0) / 1024 / 1024;
-      this.log(id, `Downloaded ${files.length} pages (${totalMb.toFixed(1)} MB)`);
-
-      // Atsumaru keys pages by sha256, so identical pages (e.g. blank separators) can only appear once.
-      const unique = files.filter((f, i) => files.findIndex((g) => g.sha256 === f.sha256) === i);
-      if (unique.length < files.length) this.log(id, `Dropped ${files.length - unique.length} duplicate page(s)`);
-
-      const seriesRef = { mangaId: link.atsuMangaId, mangaBakaId: this.requestMangaBakaId(link.requestId) };
-      const groupId = settings.atsuGroupId || null;
-      const draftFields = { number: chapter.number, title: chapterTitle(chapter.label), pageOrder: unique.map((f) => f.sha256) };
-
-      if (job.dryRun) {
-        this.setState(id, 'uploading', `[dry run] would use/create upload source ${JSON.stringify({ ...seriesRef, groupId })}`);
-        this.log(id, `[dry run] would POST /api/uploads/drafts ${JSON.stringify({ ...draftFields, pageOrder: `[${unique.length} sha256]` })}`);
-        for (const f of unique) this.log(id, `[dry run] would PUT /api/uploads/:draftId/pages/${f.sha256}?name=${f.name}`);
-        this.log(id, '[dry run] would POST /api/uploads/drafts/submit');
-        this.finish(id, 'done', null);
-        return;
-      }
+      // Pages download in parallel (the per-host limiter still caps it); results keep page order.
+      const files: { name: string; bytes: Uint8Array }[] = new Array(pages.length);
+      let next = 0;
+      let done = 0;
+      const worker = async () => {
+        try {
+          while (next < pages.length) {
+            checkCancel();
+            const i = next++;
+            const p = pages[i]!;
+            const { bytes } = await this.sources.http.bytes(p.url, { headers: p.headers });
+            if (bytes.length < 1024) throw new Error(`Page ${p.name} looks empty (${bytes.length} bytes)`);
+            files[i] = { name: p.name, bytes };
+            this.update(id, { progress: ++done });
+          }
+        } catch (err) {
+          next = pages.length; // stop the other workers picking up more pages
+          throw err;
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(PAGE_PARALLELISM, pages.length) }, worker));
 
       checkCancel();
-      this.setState(id, 'uploading', 'Preparing Atsumaru upload source');
-      const sourceId = await this.atsu.ensureSource(seriesRef, groupId);
-      const { draftId } = await this.atsu.createDraft({ sourceId, ...draftFields });
-      draft = draftId;
-      this.db.prepare('UPDATE upload_jobs SET draft_id = ? WHERE id = ?').run(draftId, id);
-      this.log(id, `Created draft ${draftId}`);
-      this.update(id, { progress: 0, total: unique.length });
-      for (const [i, f] of unique.entries()) {
-        checkCancel();
-        await this.atsu.putPage(draftId, f.sha256, f.name, f.bytes);
-        this.update(id, { progress: i + 1 });
-      }
-
-      checkCancel();
-      this.setState(id, 'submitting', `Submitting draft ${draftId}`);
-      const result = await this.atsu.submitDraft(draftId);
-      draft = null;
-      this.log(id, `Atsumaru status: ${result.status}`);
+      const seriesDir = join(this.dir, safeName(link.seriesTitle));
+      mkdirSync(seriesDir, { recursive: true });
+      const path = join(seriesDir, `${safeName(chapter.label)}.zip`);
+      writeFileSync(path, createZip(files));
+      const size = statSync(path).size;
+      this.db.prepare('UPDATE upload_jobs SET file_path = ?, file_size = ? WHERE id = ?').run(path, size, id);
+      this.log(id, `Saved ${files.length} pages (${(size / 1024 / 1024).toFixed(1)} MB) to ${path}`);
       this.finish(id, 'done', null);
     } catch (err) {
-      // Don't leave a half-uploaded draft behind; a retry starts a fresh one.
-      if (draft) await this.atsu.deleteDraft(draft).catch(() => {});
       if (err instanceof CancelError) this.finish(id, 'cancelled', 'Cancelled');
       else this.finish(id, 'failed', (err as Error).message);
     }
-  }
-
-  private requestMangaBakaId(requestId: string): string | null {
-    const r = this.db.prepare('SELECT mangabaka_id FROM requests WHERE id = ?').get(requestId) as { mangabaka_id: string | null } | undefined;
-    return r?.mangabaka_id ?? null;
   }
 
   private finish(id: number, state: 'done' | 'failed' | 'cancelled', error: string | null) {
     const job = this.get(id)!;
     const row = this.db.prepare('SELECT prev_chapter_state FROM upload_jobs WHERE id = ?').get(id) as { prev_chapter_state: ChapterState };
     this.db.prepare('UPDATE upload_jobs SET state = ?, error = ?, updated_at = ? WHERE id = ?').run(state, error, Date.now(), id);
-    // A dry run leaves the chapter as it was before queuing, so the real upload is still one click away.
-    const chapterState: ChapterState = state === 'done' && !job.dryRun ? 'uploaded' : row.prev_chapter_state;
-    this.links.setChapterState([job.chapterId], chapterState);
-    this.log(id, state === 'done' ? (job.dryRun ? 'Dry run complete' : 'Uploaded') : `${state}: ${error}`);
+    // 'downloaded' = the ZIP is ready but not yet uploaded to Atsumaru; the user marks it uploaded themselves.
+    this.links.setChapterState([job.chapterId], state === 'done' ? 'downloaded' : row.prev_chapter_state);
+    this.log(id, state === 'done' ? 'Ready to download' : `${state}: ${error}`);
   }
-
 
   private setState(id: number, state: JobState, msg: string) {
     this.db.prepare('UPDATE upload_jobs SET state = ?, updated_at = ? WHERE id = ?').run(state, Date.now(), id);
@@ -241,13 +229,14 @@ export class UploadPipeline {
     if (job) events.emitEvent({ type: 'job', job });
   }
 
-  private toJob(r: JobRow): UploadJob {
+  private toJob(r: JobRow): DownloadJob {
     let sourceName = r.source_id;
     try {
       sourceName = this.sources.get(r.source_id).name;
     } catch {
       /* adapter removed */
     }
+    const mb = uploadMangaBakaId(r.content) ?? r.mangabaka_id;
     return {
       id: r.id,
       linkId: r.link_id,
@@ -258,16 +247,14 @@ export class UploadPipeline {
       state: r.state,
       progress: r.progress,
       total: r.total,
-      dryRun: !!r.dry_run,
       error: r.error,
       log: JSON.parse(r.log_json),
       createdAt: r.created_at,
       updatedAt: r.updated_at,
+      fileSize: r.state === 'done' ? r.file_size : null,
+      uploadUrl: mb ? `https://atsu.moe/upload?mb=${encodeURIComponent(mb)}` : 'https://atsu.moe/upload',
     };
   }
 }
 
 class CancelError extends Error {}
-
-/** "Chapter 12 — The Return" → "The Return"; plain "Chapter 12" → null. */
-const chapterTitle = (label: string) => label.match(/ — (.+)$/)?.[1] ?? null;

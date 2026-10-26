@@ -1,7 +1,10 @@
 import { onUnmounted, ref } from 'vue';
 import type {
+  AtsuPresence,
   AtsuSeriesState,
+  RequestComment,
   ContentRequest,
+  DownloadJob,
   Link,
   LinkChapter,
   ServerEvent,
@@ -10,7 +13,6 @@ import type {
   SourceInfo,
   SourceMatch,
   SourceSeriesHit,
-  UploadJob,
 } from '@atsusync/shared';
 
 export interface MangaBaka {
@@ -34,7 +36,6 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 
 export const api = {
   settings: () => call<SettingsView>('GET', '/settings'),
-  atsuGroups: () => call<{ groups: { id: string; name: string }[]; canPublish: boolean }>('GET', '/atsu/groups'),
   saveSettings: (patch: Partial<Settings>) => call<SettingsView>('PUT', '/settings', patch),
 
   requests: () => call<ContentRequest[]>('GET', '/requests'),
@@ -42,6 +43,8 @@ export const api = {
   request: (id: string) =>
     call<{ request: ContentRequest; mangabaka: MangaBaka | null; matches: SourceMatch[]; links: Link[] }>('GET', `/requests/${id}`),
   requestAtsu: (id: string) => call<AtsuSeriesState>('GET', `/requests/${id}/atsu`),
+  comments: (id: string) => call<RequestComment[]>('GET', `/requests/${id}/comments`),
+  checkPresence: (id: string) => call<AtsuPresence>('POST', `/requests/${id}/presence`),
   findSources: (id: string) => call<SourceMatch[]>('POST', `/requests/${id}/find-sources`),
   addSource: (id: string, url: string) => call<SourceMatch>('POST', `/requests/${id}/add-source`, { url }),
 
@@ -56,13 +59,14 @@ export const api = {
     call<Link>('PATCH', `/links/${id}`, patch),
   deleteLink: (id: number) => call<{ ok: true }>('DELETE', `/links/${id}`),
   checkLink: (id: number) => call<{ added: number; link: Link }>('POST', `/links/${id}/check`),
-  setChapterState: (chapterIds: number[], state: 'skipped' | 'known' | 'pending') =>
+  setChapterState: (chapterIds: number[], state: 'skipped' | 'known' | 'pending' | 'uploaded') =>
     call<{ ok: true }>('POST', '/chapters/state', { chapterIds, state }),
 
-  uploads: () => call<UploadJob[]>('GET', '/uploads'),
-  upload: (chapterIds: number[]) => call<UploadJob[]>('POST', '/uploads', { chapterIds }),
-  retryUpload: (id: number) => call<UploadJob>('POST', `/uploads/${id}/retry`),
-  cancelUpload: (id: number) => call<UploadJob>('POST', `/uploads/${id}/cancel`),
+  downloads: () => call<DownloadJob[]>('GET', '/downloads'),
+  download: (chapterIds: number[]) => call<DownloadJob[]>('POST', '/downloads', { chapterIds }),
+  retryDownload: (id: number) => call<DownloadJob>('POST', `/downloads/${id}/retry`),
+  cancelDownload: (id: number) => call<DownloadJob>('POST', `/downloads/${id}/cancel`),
+  downloadFileUrl: (id: number) => `/api/downloads/${id}/file`,
 };
 
 // ---- Server-sent events: one shared EventSource for the whole app ----

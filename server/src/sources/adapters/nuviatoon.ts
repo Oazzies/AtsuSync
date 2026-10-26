@@ -19,18 +19,17 @@ interface NuviaPage {
   height?: number;
 }
 
-export function parseSearch(html: string): SourceSeriesHit[] {
-  const $ = cheerio.load(html);
-  const hits = new Map<string, SourceSeriesHit>();
-  $('a[href^="/comics/"]').each((_, el) => {
-    const href = $(el).attr('href') ?? '';
-    if (!/^\/comics\/[^/]+$/.test(href) || hits.has(href)) return;
-    const img = $(el).find('img').first();
-    const title = img.attr('alt')?.trim() || $(el).find('h2,h3,p').first().text().trim();
-    if (!title) return;
-    hits.set(href, { title, url: BASE + href, cover: resolveNextImage(img.attr('src')) });
-  });
-  return [...hits.values()];
+/**
+ * Nuviatoon's robots.txt disallows /search, so series discovery uses the sitemap instead:
+ * one request a day lists every comic. Titles come from the slug ("heart-aching" → "Heart Aching").
+ */
+export function parseSitemap(xml: string): SourceSeriesHit[] {
+  const hits: SourceSeriesHit[] = [];
+  for (const m of xml.matchAll(/<loc>\s*(https:\/\/nuviatoon\.net\/comics\/([a-z0-9-]+))\s*<\/loc>/gi)) {
+    const slug = m[2]!;
+    hits.push({ title: slug.split('-').map((w) => w[0]!.toUpperCase() + w.slice(1)).join(' '), url: m[1]! });
+  }
+  return hits;
 }
 
 export function parseSeries(html: string, url: string): SourceSeries {
@@ -115,12 +114,13 @@ export const nuviatoon: SourceAdapter = {
   id: 'nuviatoon',
   name: 'Nuviatoon',
   baseUrl: BASE,
+  kind: 'scanlation',
   hosts: ['nuviatoon.net'],
   rateLimit: { rpm: 30, concurrency: 2 },
 
-  async search(title, http) {
-    const html = await http.text(`${BASE}/search?q=${encodeURIComponent(title)}`, { cacheMs: 60 * 60_000 });
-    return parseSearch(html);
+  async search(_title, http) {
+    // Return the whole catalogue; Discovery scores titles and keeps the good matches.
+    return parseSitemap(await http.text(`${BASE}/sitemap.xml`, { cacheMs: 24 * 60 * 60_000 }));
   },
 
   async getSeries(url, http) {

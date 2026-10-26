@@ -1,7 +1,7 @@
-import type { SourceChapter, SourceSeries, SourceSeriesHit } from '@atsusync/shared';
+import type { SourceChapter, SourceKind, SourceSeries, SourceSeriesHit } from '@atsusync/shared';
 import type { SourceHttp } from './http.ts';
 
-export type { SourceChapter, SourceSeries, SourceSeriesHit };
+export type { SourceChapter, SourceKind, SourceSeries, SourceSeriesHit };
 
 /** A single image to download for a chapter, with any headers the host requires. */
 export interface PageRef {
@@ -18,6 +18,7 @@ export interface SourceAdapter {
   id: string;
   name: string;
   baseUrl: string;
+  kind: SourceKind;
   /** Hostnames this adapter owns; used for "paste a URL" and the rate limiter. */
   hosts: string[];
   /** Politeness budget, applied per host by SourceHttp. */

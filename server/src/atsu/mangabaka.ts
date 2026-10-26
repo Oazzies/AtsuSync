@@ -1,3 +1,5 @@
+import { USER_AGENT } from '../polite.ts';
+
 // MangaBaka is the preferred tracker on Atsumaru; its API gives us alt titles for matching.
 const API = 'https://api.mangabaka.org/v1';
 
@@ -15,7 +17,7 @@ const TTL = 24 * 60 * 60 * 1000;
 export async function getMangaBakaSeries(id: string, fetchImpl: typeof fetch = fetch): Promise<MangaBakaSeries | null> {
   const hit = cache.get(id);
   if (hit && Date.now() - hit.at < TTL) return hit.value;
-  const res = await fetchImpl(`${API}/series/${encodeURIComponent(id)}`, { headers: { accept: 'application/json' } });
+  const res = await fetchImpl(`${API}/series/${encodeURIComponent(id)}`, { headers: { accept: 'application/json', 'user-agent': USER_AGENT } });
   const value = res.ok ? parseMangaBaka(((await res.json()) as { data?: unknown }).data) : null;
   cache.set(id, { at: Date.now(), value });
   return value;

@@ -65,6 +65,7 @@ export class Discovery {
     const adapter = this.sources.forUrl(url);
     if (!adapter) throw new Error('No supported source for that URL');
     const series = await adapter.getSeries(url, this.sources.http);
+    if (series.chapters.length === 0) throw new Error(`${adapter.name} has no chapters to upload: ${series.emptyReason ?? 'the series is empty'}`);
     const titles = await this.titlesFor(req);
     const row: MatchRow = {
       request_id: req.id,
@@ -94,11 +95,13 @@ export class Discovery {
         .sort((a, b) => b.score - a.score)
         .slice(0, MAX_HITS_PER_SOURCE);
 
-      return await Promise.all(
+      const rows = await Promise.all(
         scored.map(async ({ h, score }) => {
           const base = { source_id: adapter.id, series_url: h.url, title: h.title, cover: h.cover ?? null, fetched_at: Date.now() };
           try {
             const s = await adapter.getSeries(h.url, this.sources.http);
+            // The site knows the series but has nothing to upload (e.g. MangaDex without English chapters).
+            if (s.chapters.length === 0) return null;
             return {
               ...base,
               title: s.title,
@@ -113,6 +116,7 @@ export class Discovery {
           }
         }),
       );
+      return rows.filter((r) => r !== null);
     } catch (err) {
       return [
         {
@@ -143,15 +147,13 @@ export class Discovery {
   }
 
   private rowToMatch(r: MatchRow): SourceMatch {
-    let sourceName = r.source_id;
-    try {
-      sourceName = this.sources.get(r.source_id).name;
-    } catch {
-      /* adapter removed */
-    }
+    const adapter = this.sources.find(r.source_id);
+    const sourceName = adapter?.name ?? r.source_id;
+    const sourceKind = adapter?.kind ?? 'scanlation';
     return {
       sourceId: r.source_id,
       sourceName,
+      sourceKind,
       seriesUrl: r.series_url,
       title: r.title,
       cover: r.cover,

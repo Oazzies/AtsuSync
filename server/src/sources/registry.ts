@@ -1,11 +1,13 @@
 import type { SourceInfo } from '@atsusync/shared';
 import type { Db } from '../db/client.ts';
+import { mangadex } from './adapters/mangadex.ts';
+import { mgread } from './adapters/mgread.ts';
 import { nuviatoon } from './adapters/nuviatoon.ts';
 import { SourceHttp } from './http.ts';
 import { matchesUrl, type SourceAdapter } from './types.ts';
 
 // Register new source sites here.
-const ADAPTERS: SourceAdapter[] = [nuviatoon];
+const ADAPTERS: SourceAdapter[] = [nuviatoon, mangadex, mgread];
 
 export class SourceRegistry {
   readonly http: SourceHttp;
@@ -30,6 +32,10 @@ export class SourceRegistry {
     return a;
   }
 
+  find(id: string): SourceAdapter | undefined {
+    return this.byId.get(id);
+  }
+
   all(): SourceAdapter[] {
     return [...this.byId.values()];
   }
@@ -49,7 +55,7 @@ export class SourceRegistry {
 
   info(): SourceInfo[] {
     const enabled = new Set(this.enabled().map((a) => a.id));
-    return this.all().map((a) => ({ id: a.id, name: a.name, baseUrl: a.baseUrl, enabled: enabled.has(a.id) }));
+    return this.all().map((a) => ({ id: a.id, name: a.name, baseUrl: a.baseUrl, kind: a.kind, enabled: enabled.has(a.id) }));
   }
 
   setEnabled(id: string, enabled: boolean) {

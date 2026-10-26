@@ -1,14 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseChapterId, parsePages, parseSearch, parseSeries } from '../src/sources/adapters/nuviatoon.ts';
+import { parseChapterId, parsePages, parseSeries, parseSitemap } from '../src/sources/adapters/nuviatoon.ts';
 
 const fx = (name: string) => readFileSync(join(import.meta.dirname, 'fixtures', name), 'utf8');
 
 describe('nuviatoon adapter', () => {
-  it('parses search results', () => {
-    const hits = parseSearch(fx('nuviatoon-search.html'));
-    expect(hits).toContainEqual(expect.objectContaining({ title: 'Heart-Aching', url: 'https://nuviatoon.net/comics/heart-aching' }));
+  it('lists series from the sitemap (search is disallowed by robots.txt)', () => {
+    const hits = parseSitemap(fx('nuviatoon-sitemap.xml'));
+    expect(hits.length).toBeGreaterThan(30);
+    expect(hits).toContainEqual({ title: 'Heart Aching', url: 'https://nuviatoon.net/comics/heart-aching' });
+    expect(hits.every((h) => /\/comics\/[a-z0-9-]+$/.test(h.url))).toBe(true);
   });
 
   it('parses series metadata and every chapter incl. half chapters', () => {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AtsuSeriesState } from '@atsusync/shared';
+import { USER_AGENT, retryAfterMs, sleep } from '../polite.ts';
 
 export const ATSU_BASE = 'https://atsu.moe';
 export const CONTENT_REQUESTS_FORUM_ID = 'cms0o0eh80000uj0lmpkut6tc';
@@ -18,6 +19,7 @@ export interface AtsuPost {
   forumId: string;
   title: string;
   content: string;
+  sectionId?: string;
   commentCount: number;
   score: number;
   pinned: boolean;
@@ -53,6 +55,30 @@ export interface SubmitResult {
   message?: string | null;
 }
 
+export interface AtsuComment {
+  id: string;
+  content: string;
+  createdAt: number;
+  removed: boolean;
+  score: number;
+  parentId: string | null;
+  user: { usernameDisplay: string; usernameSlug: string } | null;
+  replies?: AtsuComment[];
+}
+
+/** One hit from Atsumaru's public series search (Typesense). */
+export interface AtsuSearchHit {
+  id: string;
+  title: string;
+  otherNames: string[];
+  chapterCount: number;
+  dateAdded: number | null;
+  type: string | null;
+  /** "Comic" or "Novel". */
+  medium: string | null;
+  isAdult: boolean;
+}
+
 export class AtsuError extends Error {
   constructor(message: string, readonly status?: number) {
     super(message);
@@ -67,13 +93,25 @@ export class AtsuError extends Error {
  *   → PUT each page by sha256 → submit drafts for review.
  */
 export class AtsuClient {
+  /** Requests to atsu.moe are spaced at least this far apart (page uploads included). */
+  private minIntervalMs = 350;
+  private nextAt = 0;
+
   constructor(
     private getCookie: () => string,
     private fetchImpl: typeof fetch = fetch,
   ) {}
 
+  private async turn() {
+    const wait = this.nextAt - Date.now();
+    this.nextAt = Math.max(Date.now(), this.nextAt) + this.minIntervalMs;
+    if (wait > 0) await sleep(wait);
+  }
+
   private async request(path: string, init: RequestInit = {}, attempt = 0): Promise<Response> {
+    await this.turn();
     const headers = new Headers(init.headers);
+    headers.set('user-agent', USER_AGENT);
     const cookie = this.getCookie().trim();
     if (cookie) headers.set('cookie', cookie);
     headers.set('accept', headers.get('accept') ?? 'application/json');
@@ -81,9 +119,10 @@ export class AtsuClient {
     headers.set('referer', `${ATSU_BASE}/upload`);
     const res = await this.fetchImpl(`${ATSU_BASE}${path}`, { ...init, headers });
     if ((res.status === 429 || res.status >= 500) && attempt < 4) {
-      const retryAfter = Number(res.headers.get('retry-after')) * 1000;
       const backoff = 1000 * 2 ** attempt * (0.75 + Math.random() * 0.5);
-      await sleep(Math.max(backoff, retryAfter || 0));
+      const wait = Math.max(backoff, retryAfterMs(res) ?? 0);
+      this.nextAt = Math.max(this.nextAt, Date.now() + wait);
+      await sleep(wait);
       return this.request(path, init, attempt + 1);
     }
     return res;
@@ -102,8 +141,39 @@ export class AtsuClient {
     return this.json<AtsuPostsPage>(`/api/forum/posts?${q}`);
   }
 
-  getPost(postId: string) {
-    return this.json<{ post?: AtsuPost } & Partial<AtsuPost>>(`/api/forum/getPost?postId=${encodeURIComponent(postId)}`);
+  async getPost(postId: string): Promise<AtsuPost | null> {
+    const r = await this.json<{ post?: AtsuPost }>(`/api/forum/getPost?postId=${encodeURIComponent(postId)}`);
+    return r.post ?? null;
+  }
+
+  /** Comment threads under a forum post, newest first, flattened with replies. */
+  async getComments(sectionId: string): Promise<AtsuComment[]> {
+    const q = new URLSearchParams({ sectionId, maxDepth: '3', sort: 'new' });
+    const r = await this.json<{ comments?: AtsuComment[] }>(`/api/comments/v2/threads?${q}`);
+    const out: AtsuComment[] = [];
+    const walk = (list: AtsuComment[] = []) =>
+      list.forEach((c) => {
+        out.push({ ...c, replies: undefined });
+        walk(c.replies);
+      });
+    walk(r.comments);
+    return out;
+  }
+
+  /** Atsumaru's public series search (no login needed). */
+  async searchPublic(q: string, limit = 5): Promise<AtsuSearchHit[]> {
+    const params = new URLSearchParams({ q, query_by: 'title,englishTitle,otherNames', limit: String(limit) });
+    const r = await this.json<{ hits?: { document: Record<string, any> }[] }>(`/collections/manga/documents/search?${params}`);
+    return (r.hits ?? []).map(({ document: d }) => ({
+      id: String(d.id),
+      title: String(d.title ?? d.englishTitle ?? ''),
+      otherNames: Array.isArray(d.otherNames) ? d.otherNames : [],
+      chapterCount: Number(d.chapterCount ?? 0),
+      dateAdded: typeof d.dateAdded === 'number' ? d.dateAdded : null,
+      type: d.type ?? null,
+      medium: d.medium ?? null,
+      isAdult: !!d.isAdult,
+    }));
   }
 
   async listTags(forumId = CONTENT_REQUESTS_FORUM_ID) {
@@ -235,5 +305,4 @@ const jsonInit = (method: string, body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const safeText = async (res: Response) => (await res.text().catch(() => '')).slice(0, 300);
