@@ -36,7 +36,12 @@ export class Discovery {
     const rows = this.db
       .prepare('SELECT * FROM source_matches WHERE request_id = ? ORDER BY score DESC')
       .all(requestId) as unknown as MatchRow[];
-    return rows.map((r) => this.rowToMatch(r));
+    // "(search failed)" rows left over from before a source lost its search can never be refreshed; hide and purge them.
+    const stale = rows.filter((r) => r.series_url.endsWith('#search-error') && !this.sources.find(r.source_id)?.search);
+    if (stale.length) {
+      for (const r of stale) this.db.prepare('DELETE FROM source_matches WHERE request_id = ? AND source_id = ? AND series_url = ?').run(r.request_id, r.source_id, r.series_url);
+    }
+    return rows.filter((r) => !stale.includes(r)).map((r) => this.rowToMatch(r));
   }
 
   async titlesFor(req: ContentRequest): Promise<string[]> {

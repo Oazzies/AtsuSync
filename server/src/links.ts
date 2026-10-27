@@ -107,8 +107,8 @@ export class LinksRepo {
     this.db.prepare('DELETE FROM links WHERE id = ?').run(id);
   }
 
-  /** Insert chapters not seen before. Returns the newly inserted ones. */
-  applySeries(linkId: number, series: SourceSeries, newState: ChapterState): LinkChapter[] {
+  /** Insert chapters not seen before. `added` are the new rows; `unlocked` are known chapters that just went from paid to free. */
+  applySeries(linkId: number, series: SourceSeries, newState: ChapterState): { added: LinkChapter[]; unlocked: LinkChapter[] } {
     const existing = new Map(
       (this.db.prepare('SELECT id, number, locked, url, label FROM source_chapters WHERE link_id = ?').all(linkId) as unknown as ChapterRow[]).map(
         (r) => [r.number, r],
@@ -119,19 +119,23 @@ export class LinksRepo {
     );
     const refresh = this.db.prepare('UPDATE source_chapters SET label = ?, url = ?, locked = ? WHERE id = ?');
     const added: number[] = [];
+    const unlocked: number[] = [];
     const now = Date.now();
     for (const c of series.chapters) {
       const prev = existing.get(c.number);
       if (prev) {
         // Locked/early-access chapters unlock over time; keep the row current.
         if (prev.locked !== (c.locked ? 1 : 0) || prev.url !== c.url || prev.label !== c.label) refresh.run(c.label, c.url, c.locked ? 1 : 0, prev.id);
+        if (prev.locked && !c.locked) unlocked.push(prev.id);
         continue;
       }
       const res = insert.run(linkId, c.number, c.label, c.url, c.locked ? 1 : 0, newState, now);
       added.push(Number(res.lastInsertRowid));
     }
     this.db.prepare('UPDATE links SET series_title = ? WHERE id = ?').run(series.title, linkId);
-    return added.length ? this.chapters(linkId).filter((c) => added.includes(c.id)) : [];
+    if (!added.length && !unlocked.length) return { added: [], unlocked: [] };
+    const rows = this.chapters(linkId);
+    return { added: rows.filter((c) => added.includes(c.id)), unlocked: rows.filter((c) => unlocked.includes(c.id)) };
   }
 
   markChecked(id: number, error: string | null) {

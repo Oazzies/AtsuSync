@@ -1,8 +1,12 @@
 import type { SourceInfo } from '@atsusync/shared';
 import type { Db } from '../db/client.ts';
+import { arenascan } from './adapters/arenascan.ts';
+import { lewdmanhwa } from './adapters/lewdmanhwa.ts';
 import { mangadex } from './adapters/mangadex.ts';
 import { kingofshojo } from './adapters/kingofshojo.ts';
 import { mgeko } from './adapters/mgeko.ts';
+import { mangafreak } from './adapters/mangafreak.ts';
+import { mangapill } from './adapters/mangapill.ts';
 import { mgread } from './adapters/mgread.ts';
 import { nuviatoon } from './adapters/nuviatoon.ts';
 import { webtoon } from './adapters/webtoon.ts';
@@ -10,7 +14,7 @@ import { SourceHttp } from './http.ts';
 import { matchesUrl, type SourceAdapter } from './types.ts';
 
 // Register new source sites here.
-const ADAPTERS: SourceAdapter[] = [nuviatoon, mangadex, mgread, mgeko, kingofshojo, webtoon];
+const ADAPTERS: SourceAdapter[] = [nuviatoon, mangadex, mgread, mgeko, kingofshojo, webtoon, mangapill, lewdmanhwa, mangafreak, arenascan];
 
 export class SourceRegistry {
   readonly http: SourceHttp;

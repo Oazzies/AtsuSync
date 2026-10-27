@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseChapterList, parsePages, parseSeries, parseSeriesUrl, webtoon } from '../src/sources/adapters/webtoon.ts';
+import { parseChapterList, parsePages, parseSeries, parseSeriesUrl, parseViewerNav, webtoon } from '../src/sources/adapters/webtoon.ts';
 import { matchesUrl } from '../src/sources/types.ts';
 
 const fx = (name: string) => readFileSync(join(import.meta.dirname, 'fixtures', name), 'utf8');
@@ -57,6 +57,14 @@ describe('webtoon adapter', () => {
     expect(pages.length).toBeGreaterThan(0);
     expect(pages[0]).toMatchObject({ name: '001.jpg', headers: { referer: 'https://www.webtoons.com/' } });
     expect(pages[0]!.url).toMatch(/^https:\/\/webtoon-phinf\.pstatic\.net\//);
+  });
+
+  it('reads prev link and the embedded episode list from a viewer page', () => {
+    const nav = parseViewerNav(fx('webtoon-viewer.html'));
+    expect(nav.prev).toContain('episode_no=211');
+    expect(nav.episodes.length).toBeGreaterThan(200);
+    expect(nav.episodes[0]).toMatchObject({ episodeNo: 1, title: 'Pages 1 - 6' });
+    expect(nav.episodes[0]!.url).toContain('episode_no=1&');
   });
 
   it('refuses locked chapters without fetching', async () => {

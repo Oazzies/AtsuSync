@@ -45,7 +45,7 @@ export class Watcher {
       const adapter = this.sources.get(link.sourceId);
       this.sources.http.invalidate(link.seriesUrl);
       const series = await adapter.getSeries(link.seriesUrl, this.sources.http);
-      const added = this.links.applySeries(link.id, series, 'pending');
+      const { added, unlocked } = this.links.applySeries(link.id, series, 'pending');
 
       if (this.atsu && link.atsuMangaId) {
         const state = await this.atsu.getSeriesState({ mangaId: link.atsuMangaId }).catch(() => null);
@@ -54,15 +54,26 @@ export class Watcher {
 
       this.links.markChecked(link.id, null);
       const stillPending = added.filter((c) => this.links.chapter(c.id)?.state === 'pending');
-      if (stillPending.length) {
+      // Paid chapters aren't announced as new (they can't be downloaded); they get their own event once they go free.
+      const available = stillPending.filter((c) => !c.locked);
+      if (available.length) {
         events.emitEvent({
           type: 'new_chapters',
           linkId: link.id,
           seriesTitle: series.title,
-          labels: stillPending.map((c) => c.label),
+          labels: available.map((c) => c.label),
         });
       }
-      return stillPending;
+      const nowFree = unlocked.filter((c) => this.links.chapter(c.id)?.state === 'pending');
+      if (nowFree.length) {
+        events.emitEvent({
+          type: 'chapters_unlocked',
+          linkId: link.id,
+          seriesTitle: series.title,
+          labels: nowFree.map((c) => c.label),
+        });
+      }
+      return available;
     } catch (err) {
       this.links.markChecked(link.id, (err as Error).message);
       return [];

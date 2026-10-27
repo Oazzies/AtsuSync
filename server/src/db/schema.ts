@@ -104,4 +104,8 @@ export const migrations: string[] = [
   -- Sites that know a series but have no chapters to upload are no longer listed.
   DELETE FROM source_matches WHERE chapter_count = 0 AND error IS NULL;
   `,
+  `
+  -- A download can fetch its chapter from a different site than the link's without rewriting the chapter row.
+  ALTER TABLE upload_jobs ADD COLUMN source_url TEXT;
+  `,
 ];

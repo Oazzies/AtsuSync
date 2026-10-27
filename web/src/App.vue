@@ -30,6 +30,12 @@ useServerEvents((e) => {
       new Notification(`AtsuSync: ${e.seriesTitle}`, { body: e.labels.join(', ') });
     }
   }
+  if (e.type === 'chapters_unlocked') {
+    toast(`Now free on ${e.seriesTitle}`, { description: e.labels.join(', ') });
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(`AtsuSync: ${e.seriesTitle}`, { body: `Now free: ${e.labels.join(', ')}` });
+    }
+  }
   if (e.type === 'job' && e.job.state === 'failed') toast.error(`Download failed: ${e.job.seriesTitle} ${e.job.chapterLabel}`, { description: e.job.error ?? undefined });
   if (e.type === 'job' && e.job.state === 'done') toast.success(`Ready: ${e.job.seriesTitle} ${e.job.chapterLabel}`, { description: 'Save it from the series page.' });
   void refreshCounts();

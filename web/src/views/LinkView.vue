@@ -6,6 +6,7 @@ import { ArrowLeft, CheckCheck, ChevronDown, ChevronRight, Download, DownloadClo
 import type { DownloadJob, LinkChapter } from '@atsusync/shared';
 import { api, fmtAgo, fmtRanges, useAsync, useServerEvents } from '@/api/client';
 import KindBadge from '@/components/KindBadge.vue';
+import FetchFromOther from '@/components/FetchFromOther.vue';
 import ManualChapter from '@/components/ManualChapter.vue';
 import StatusBadge from '@/components/StatusBadge.vue';
 import { Badge } from '@/components/ui/badge';
@@ -32,6 +33,7 @@ const filter = ref<'missing' | 'all'>('missing');
 const jobs = ref<DownloadJob[]>([]);
 const openLogs = ref(new Set<number>());
 const building = ref(false);
+const fetching = ref(false);
 
 const activeJob = (j: DownloadJob) => !['done', 'failed', 'cancelled'].includes(j.state);
 const fmtSize = (bytes: number | null) => (bytes == null ? '' : `${(bytes / 1024 / 1024).toFixed(1)} MB`);
@@ -123,6 +125,11 @@ const clearDownloads = () => {
     await loadJobs();
   });
 };
+async function fetchQueued() {
+  await run();
+  await loadJobs();
+  emit('changed');
+}
 async function manualSaved() {
   building.value = false;
   await run();
@@ -164,7 +171,7 @@ useServerEvents((e) => {
   }
   const mine =
     (e.type === 'job' && e.job.linkId === props.id && ['done', 'failed', 'cancelled'].includes(e.job.state)) ||
-    (e.type === 'new_chapters' && e.linkId === props.id);
+    ((e.type === 'new_chapters' || e.type === 'chapters_unlocked') && e.linkId === props.id);
   if (mine) void run();
 });
 
@@ -239,6 +246,8 @@ onMounted(() => {
 
       <ManualChapter v-if="building" :link-id="id" @saved="manualSaved" @close="building = false" />
 
+      <FetchFromOther v-if="fetching" :link-id="id" :series-title="link.seriesTitle" @queued="fetchQueued" @close="fetching = false" />
+
       <Card class="py-0">
         <div class="flex flex-wrap items-center gap-2 border-b p-3">
           <Tabs v-model="filter">
@@ -248,6 +257,7 @@ onMounted(() => {
             </TabsList>
           </Tabs>
           <div class="flex-1" />
+          <Button variant="outline" size="sm" :disabled="fetching" @click="fetching = true"><DownloadCloud class="size-4" /> From another source</Button>
           <Button variant="outline" size="sm" :disabled="building" @click="building = true"><Plus class="size-4" /> Add chapter</Button>
           <Button variant="outline" size="sm" :disabled="busy || !allDownloadable.length" @click="downloadAll">
             <DownloadCloud class="size-4" /> Download all ({{ allDownloadable.length }})

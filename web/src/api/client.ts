@@ -12,6 +12,7 @@ import type {
   SettingsView,
   SourceInfo,
   SourceMatch,
+  SourceChapter,
   SourceSeriesHit,
 } from '@atsusync/shared';
 
@@ -58,6 +59,17 @@ export const api = {
   updateLink: (id: number, patch: { watch?: boolean; checkIntervalMin?: number; atsuMangaId?: string | null }) =>
     call<Link>('PATCH', `/links/${id}`, patch),
   deleteLink: (id: number) => call<{ ok: true }>('DELETE', `/links/${id}`),
+  searchOtherSources: (id: number, q?: string) =>
+    call<{ sourceId: string; sourceName: string; hits: SourceSeriesHit[]; error: string | null }[]>(
+      'GET',
+      `/links/${id}/search-sources${q ? `?q=${encodeURIComponent(q)}` : ''}`,
+    ),
+  otherSeries: (id: number, url: string) =>
+    call<{ sourceName: string; title: string; url: string; chapters: (SourceChapter & { inLink: boolean })[] }>(
+      'GET',
+      `/links/${id}/other-series?url=${encodeURIComponent(url)}`,
+    ),
+  fetchFrom: (id: number, url: string, numbers: number[]) => call<DownloadJob[]>('POST', `/links/${id}/fetch-from`, { url, numbers }),
   checkLink: (id: number) => call<{ added: number; link: Link }>('POST', `/links/${id}/check`),
   setChapterState: (chapterIds: number[], state: 'skipped' | 'known' | 'pending' | 'uploaded') =>
     call<{ ok: true }>('POST', '/chapters/state', { chapterIds, state }),

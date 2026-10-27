@@ -16,7 +16,7 @@ const rest = computed(() => (data.value ?? []).filter((l) => l.pendingCount === 
 const fmtInterval = (m: number) => (m < 60 ? `${m}m` : `${m / 60}h`);
 
 useServerEvents((e) => {
-  if (e.type === 'new_chapters' || e.type === 'job') void run();
+  if (e.type === 'new_chapters' || e.type === 'chapters_unlocked' || e.type === 'job') void run();
 });
 onMounted(run);
 </script>

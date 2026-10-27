@@ -5,6 +5,7 @@ import sharp from 'sharp';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SourceChapter } from '@atsusync/shared';
 import { buildApp } from '../src/app.ts';
+import { events } from '../src/events.ts';
 import type { SourceAdapter } from '../src/sources/types.ts';
 
 // PNG signature followed by filler, so it passes the image check.
@@ -30,12 +31,12 @@ function fakeAdapter(chapters: { current: SourceChapter[] }): SourceAdapter {
 
 const ch = (n: number, locked = false): SourceChapter => ({ number: n, label: `Chapter ${n}`, url: `https://fake.test/s/heart/${n}`, locked });
 
-function setup(opts: { failImages?: boolean } = {}) {
+function setup(opts: { failImages?: boolean; extra?: SourceAdapter[] } = {}) {
   const chapters = { current: [ch(1), ch(2)] };
   const atsuCalls: { method: string; url: string; body?: any }[] = [];
   const fetchImpl = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url.startsWith('https://fake.test/img/')) return opts.failImages ? new Response('nope', { status: 404 }) : new Response(PAGE);
+    if (url.startsWith('https://fake.test/img/') || url.startsWith('https://other.test/img/')) return opts.failImages ? new Response('nope', { status: 404 }) : new Response(PAGE);
     const method = init?.method ?? 'GET';
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
     atsuCalls.push({ method, url, body });
@@ -46,7 +47,7 @@ function setup(opts: { failImages?: boolean } = {}) {
     return json({});
   }) as unknown as typeof fetch;
 
-  const ctx = buildApp({ dbFile: ':memory:', downloadsDir: mkdtempSync(join(tmpdir(), 'atsusync-')), adapters: [fakeAdapter(chapters)], fetchImpl, background: false });
+  const ctx = buildApp({ dbFile: ':memory:', downloadsDir: mkdtempSync(join(tmpdir(), 'atsusync-')), adapters: [fakeAdapter(chapters), ...(opts.extra ?? [])], fetchImpl, background: false });
   ctx.requests.upsertPost({
     id: 'REQ1',
     forumId: 'f',
@@ -122,6 +123,35 @@ describe('download pipeline', () => {
     expect(zip.includes(Buffer.from('002.webp'))).toBe(true);
   });
 
+  it('downloads a chapter from another site onto a link without linking that site', async () => {
+    const other: SourceAdapter = {
+      id: 'other',
+      name: 'Other Scans',
+      baseUrl: 'https://other.test',
+      kind: 'aggregator',
+      hosts: ['other.test'],
+      rateLimit: { rpm: 6000, concurrency: 4 },
+      getSeries: async (url) => ({ title: 'Heart Aching', url, altTitles: [], chapters: [{ number: 2, label: 'Chapter 2', url: 'https://other.test/heart-2', locked: false }] }),
+      getChapterPages: async (c) => [{ url: `https://other.test/img/${c.number}/1.webp`, name: '001.webp' }],
+    };
+    const t = setup({ extra: [other] });
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
+
+    const res = await t.app.inject({ method: 'POST', url: `/api/links/${link.id}/fetch-from`, payload: { url: 'https://other.test/s/heart', numbers: [2] } });
+    expect(res.statusCode).toBe(200);
+    const [job] = await waitForJobs(t.pipeline);
+
+    expect(job).toMatchObject({ state: 'done', total: 1, sourceName: 'Fake Scans' });
+    const c2 = t.links.chapters(link.id).find((c) => c.number === 2)!;
+    expect(c2).toMatchObject({ url: 'https://fake.test/s/heart/2', state: 'downloaded' }); // row stays on the linked site
+    expect(job!.log.join(' ')).toContain('from Other Scans');
+    expect(t.links.list()).toHaveLength(1);
+
+    const bad = await t.app.inject({ method: 'POST', url: `/api/links/${link.id}/fetch-from`, payload: { url: 'https://other.test/s/heart', numbers: [99] } });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it('clearing a link deletes finished jobs and ZIPs and makes chapters downloadable again', async () => {
     const t = setup();
     close = () => t.app.close();
@@ -181,6 +211,25 @@ describe('download pipeline', () => {
     // Clearing removes the hand-built chapter entirely, since it can't be re-fetched.
     t.pipeline.clear(link.id);
     expect(t.links.chapters(link.id).some((c) => c.number === 3.5)).toBe(false);
+  });
+
+  it('announces a paid chapter only once it goes free', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
+    const seen: string[] = [];
+    const off = events.onEvent((e) => e.type !== 'job' && e.type !== 'requests_synced' && seen.push(`${e.type}:${e.labels.join(',')}`));
+
+    t.chapters.current = [ch(1), ch(2), ch(3, true)];
+    expect(await t.watcher.check(t.links.get(link.id)!)).toHaveLength(0);
+    expect(seen).toEqual([]);
+    expect(t.links.chapters(link.id).find((c) => c.number === 3)).toMatchObject({ locked: true, state: 'pending' });
+
+    t.chapters.current = [ch(1), ch(2), ch(3)];
+    await t.watcher.check(t.links.get(link.id)!);
+    off();
+    expect(seen).toEqual(['chapters_unlocked:Chapter 3']);
+    expect(t.links.chapters(link.id).find((c) => c.number === 3)).toMatchObject({ locked: false, state: 'pending' });
   });
 
   it('a failed download restores the chapter state', async () => {

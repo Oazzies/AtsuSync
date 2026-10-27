@@ -1,6 +1,6 @@
 import { mkdirSync, readdirSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { ChapterState, DownloadJob, JobState } from '@atsusync/shared';
+import type { ChapterState, DownloadJob, JobState, SourceChapter } from '@atsusync/shared';
 import { uploadMangaBakaId } from '../atsu/requests.ts';
 import type { Db } from '../db/client.ts';
 import { events } from '../events.ts';
@@ -20,6 +20,7 @@ interface JobRow {
   log_json: string;
   file_path: string | null;
   file_size: number | null;
+  source_url: string | null;
   created_at: number;
   updated_at: number;
   chapter_label: string;
@@ -95,7 +96,8 @@ export class DownloadPipeline {
     return { path: row.file_path, name: `${safeName(job.seriesTitle)} - ${safeName(job.chapterLabel)}.zip` };
   }
 
-  enqueue(chapterIds: number[]): DownloadJob[] {
+  /** `urls` overrides a chapter's page URL for this download only (see addFromSource). */
+  enqueue(chapterIds: number[], urls: Record<number, string> = {}): DownloadJob[] {
     const created: number[] = [];
     for (const chapterId of chapterIds) {
       const ch = this.links.chapter(chapterId);
@@ -109,10 +111,10 @@ export class DownloadPipeline {
       const now = Date.now();
       const res = this.db
         .prepare(
-          `INSERT INTO upload_jobs (link_id, chapter_id, state, dry_run, prev_chapter_state, created_at, updated_at)
-           VALUES (?, ?, 'queued', 0, ?, ?, ?)`,
+          `INSERT INTO upload_jobs (link_id, chapter_id, state, dry_run, prev_chapter_state, source_url, created_at, updated_at)
+           VALUES (?, ?, 'queued', 0, ?, ?, ?, ?)`,
         )
-        .run(ch.link_id, chapterId, ch.state === 'queued' ? 'known' : ch.state, now, now);
+        .run(ch.link_id, chapterId, ch.state === 'queued' ? 'known' : ch.state, urls[chapterId] ?? null, now, now);
       this.links.setChapterState([chapterId], 'queued');
       created.push(Number(res.lastInsertRowid));
     }
@@ -120,6 +122,32 @@ export class DownloadPipeline {
     jobs.forEach((j) => events.emitEvent({ type: 'job', job: j }));
     this.pump();
     return jobs;
+  }
+
+  /**
+   * Download chapters from a different site than the link's own, e.g. when some chapters are broken on
+   * the linked one. The job (not the chapter row) remembers the other site's URL, so later downloads of
+   * that chapter go back to the linked site. A chapter the link lacks is added with the other site's URL.
+   */
+  addFromSource(linkId: number, chapters: SourceChapter[]): DownloadJob[] {
+    if (!this.links.get(linkId)) throw new Error('Unknown link');
+    const now = Date.now();
+    const ids: number[] = [];
+    const urls: Record<number, string> = {};
+    for (const c of chapters) {
+      if (c.locked) throw new Error(`${c.label} is locked on that site`);
+      const existing = this.db.prepare('SELECT id FROM source_chapters WHERE link_id = ? AND number = ?').get(linkId, c.number) as { id: number } | undefined;
+      if (existing) {
+        ids.push(existing.id);
+        urls[existing.id] = c.url;
+      } else {
+        const res = this.db
+          .prepare(`INSERT INTO source_chapters (link_id, number, label, url, locked, state, first_seen_at) VALUES (?, ?, ?, ?, 0, 'known', ?)`)
+          .run(linkId, c.number, c.label, c.url, now);
+        ids.push(Number(res.lastInsertRowid));
+      }
+    }
+    return this.enqueue(ids, urls);
   }
 
   /**
@@ -267,7 +295,9 @@ export class DownloadPipeline {
     const job = this.get(id)!;
     const chapter = this.links.chapter(job.chapterId)!;
     const link = this.links.get(job.linkId)!;
-    const adapter = this.sources.get(link.sourceId);
+    // A chapter fetched from another site (see addFromSource) is resolved by its own URL's adapter.
+    const pageUrl = (this.db.prepare('SELECT source_url FROM upload_jobs WHERE id = ?').get(id) as { source_url: string | null }).source_url ?? chapter.url;
+    const adapter = this.sources.forUrl(pageUrl) ?? this.sources.get(link.sourceId);
     const checkCancel = () => {
       if (this.cancelled.has(id)) throw new CancelError();
     };
@@ -275,7 +305,7 @@ export class DownloadPipeline {
     try {
       this.setState(id, 'downloading', `Resolving pages for ${chapter.label} from ${adapter.name}`);
       const pages = await adapter.getChapterPages(
-        { number: chapter.number, label: chapter.label, url: chapter.url, locked: !!chapter.locked },
+        { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked },
         this.sources.http,
       );
       this.update(id, { total: pages.length, progress: 0 });

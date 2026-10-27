@@ -1,4 +1,6 @@
 import * as cheerio from 'cheerio';
+import { BlockedError } from '../../polite.ts';
+import type { SourceHttp } from '../http.ts';
 import type { PageRef, SourceAdapter, SourceChapter, SourceSeries } from '../types.ts';
 
 // WEBTOON (webtoons.com). Series live at /<lang>/<genre|canvas>/<slug>/list?title_no=<n>, episodes at
@@ -9,6 +11,7 @@ import type { PageRef, SourceAdapter, SourceChapter, SourceSeries } from '../typ
 // try to get around a paywall. Canvas (creator-uploaded) series are always free.
 const BASE = 'https://www.webtoons.com';
 const MAX_LIST_PAGES = 120;
+const MAX_WALK_STEPS = 400;
 
 interface SeriesRef {
   lang: string;
@@ -118,6 +121,62 @@ export function parsePages(html: string): PageRef[] {
   return pages;
 }
 
+/** The site-wide episode id from a viewer URL. */
+const episodeNoOf = (url: string): number | null => {
+  const n = Number(new URL(url, BASE).searchParams.get('episode_no'));
+  return Number.isInteger(n) && n > 0 ? n : null;
+};
+
+/**
+ * A viewer page links to the previous episode and (on Canvas) embeds the series' whole episode list in
+ * `#_bottomEpisodeList`. Both are plain, robots-allowed pages, so they fill the gap the list pages leave.
+ */
+export function parseViewerNav(html: string): { prev?: string; episodes: { episodeNo: number; url: string; title: string }[] } {
+  const $ = cheerio.load(html);
+  const prev = $('a._prevEpisode').attr('href');
+  const episodes: { episodeNo: number; url: string; title: string }[] = [];
+  $('#_bottomEpisodeList li[data-episode-no]').each((_, el) => {
+    const href = $(el).find('a').first().attr('href');
+    const episodeNo = Number($(el).attr('data-episode-no'));
+    if (!href || href === '#' || !Number.isInteger(episodeNo) || episodeNo <= 0) return;
+    episodes.push({ episodeNo, url: abs(href), title: $(el).find('.subj').first().text().replace(/\s+/g, ' ').trim() });
+  });
+  return { prev: prev && prev !== '#' ? abs(prev) : undefined, episodes };
+}
+
+/**
+ * robots.txt forbids some list pages (its `&page=1` rule also matches page=10..19). Older episodes are then
+ * recovered from the oldest known episode's viewer page. Numbering follows the list's own: the offset between
+ * `episode_no` and the printed number at the oldest known episode is assumed constant.
+ */
+async function fillOlder(chapters: Map<number, SourceChapter>, http: SourceHttp) {
+  const oldest = [...chapters.values()].filter((c) => c.url).sort((a, b) => a.number - b.number)[0];
+  const oldestNo = oldest && episodeNoOf(oldest.url);
+  if (!oldest || !oldestNo) return;
+  const numberFor = (episodeNo: number) => oldest.number - (oldestNo - episodeNo);
+  const add = (episodeNo: number, url: string, title: string) => {
+    const number = numberFor(episodeNo);
+    if (number <= 0 || chapters.has(number)) return;
+    chapters.set(number, { number, label: title || `Episode ${number}`, title: title || undefined, url, locked: false });
+  };
+
+  let url: string | undefined = oldest.url;
+  const visited = new Set<string>();
+  for (let step = 0; url && step < MAX_WALK_STEPS && !visited.has(url); step++) {
+    visited.add(url);
+    const nav = parseViewerNav(await http.text(url, { cacheMs: 10 * 60_000 }));
+    for (const e of nav.episodes) if (e.episodeNo < oldestNo) add(e.episodeNo, e.url, e.title);
+    if (nav.episodes.some((e) => e.episodeNo < oldestNo)) {
+      // The embedded list covered everything before this episode; nothing left to walk.
+      return;
+    }
+    const prevNo = nav.prev ? episodeNoOf(nav.prev) : null;
+    if (!nav.prev || !prevNo) return;
+    add(prevNo, nav.prev, '');
+    url = nav.prev;
+  }
+}
+
 export const webtoon: SourceAdapter = {
   id: 'webtoon',
   name: 'WEBTOON',
@@ -146,7 +205,14 @@ export const webtoon: SourceAdapter = {
     };
     add(parseChapterList(first));
     for (let page = 2; page <= MAX_LIST_PAGES; page++) {
-      const html = await http.text(`${base}&page=${page}`, { cacheMs: 10 * 60_000 });
+      let html: string;
+      try {
+        html = await http.text(`${base}&page=${page}`, { cacheMs: 10 * 60_000 });
+      } catch (e) {
+        if (!(e instanceof BlockedError)) throw e;
+        await fillOlder(byNumber, http); // robots.txt disallows this list page; use the viewer pages instead
+        break;
+      }
       if (add(parseChapterList(html)) === 0) break;
     }
     const chapters = [...byNumber.values()].sort((a, b) => a.number - b.number);

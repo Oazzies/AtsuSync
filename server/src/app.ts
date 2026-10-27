@@ -158,6 +158,50 @@ export function buildApp(opts: AppOptions) {
     const added = await watcher.check(link);
     return { added: added.length, link: links.get(link.id) };
   });
+  // Pull specific chapters from another site into an existing link (e.g. ones that are broken on the linked site).
+  const sourceFor = (url: string) => {
+    const adapter = sources.forUrl(url);
+    if (!adapter) throw Object.assign(new Error('No source handles that URL'), { statusCode: 400 });
+    return adapter;
+  };
+  app.get<{ Params: { id: string }; Querystring: { q?: string } }>('/api/links/:id/search-sources', async (req) => {
+    const link = links.get(Number(req.params.id));
+    if (!link) throw Object.assign(new Error('Link not found'), { statusCode: 404 });
+    const q = (req.query.q || link.seriesTitle).trim();
+    const searchable = sources.enabled().filter((a) => a.search && a.id !== link.sourceId);
+    const results = await Promise.all(
+      searchable.map(async (a) => {
+        try {
+          return { sourceId: a.id, sourceName: a.name, hits: (await a.search!(q, sources.http)).slice(0, 5), error: null };
+        } catch (e) {
+          return { sourceId: a.id, sourceName: a.name, hits: [], error: (e as Error).message };
+        }
+      }),
+    );
+    return results;
+  });
+  app.get<{ Params: { id: string }; Querystring: { url: string } }>('/api/links/:id/other-series', async (req) => {
+    const link = links.get(Number(req.params.id));
+    if (!link) throw Object.assign(new Error('Link not found'), { statusCode: 404 });
+    const adapter = sourceFor(req.query.url);
+    const series = await adapter.getSeries(req.query.url, sources.http);
+    const have = new Set(links.chapters(link.id).map((c) => c.number));
+    return {
+      sourceName: adapter.name,
+      title: series.title,
+      url: series.url,
+      chapters: series.chapters.map((c) => ({ ...c, inLink: have.has(c.number) })),
+    };
+  });
+  app.post<{ Params: { id: string }; Body: { url: string; numbers: number[] } }>('/api/links/:id/fetch-from', async (req) => {
+    const link = links.get(Number(req.params.id));
+    if (!link) throw Object.assign(new Error('Link not found'), { statusCode: 404 });
+    const series = await sourceFor(req.body.url).getSeries(req.body.url, sources.http);
+    const wanted = new Set(req.body.numbers);
+    const picked = series.chapters.filter((c) => wanted.has(c.number));
+    if (picked.length !== wanted.size) throw Object.assign(new Error('Some requested chapters are not on that site'), { statusCode: 400 });
+    return pipeline.addFromSource(link.id, picked);
+  });
   app.post<{ Body: { chapterIds: number[]; state: 'skipped' | 'known' | 'pending' | 'uploaded' } }>('/api/chapters/state', async (req) => {
     links.setChapterState(req.body.chapterIds, req.body.state);
     return { ok: true };

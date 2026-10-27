@@ -226,4 +226,6 @@ export interface SettingsView extends Omit<Settings, 'atsuCookie'> {
 export type ServerEvent =
   | { type: 'job'; job: DownloadJob }
   | { type: 'new_chapters'; linkId: number; seriesTitle: string; labels: string[] }
+  /** Chapters that were paid / early access and are now free to download. */
+  | { type: 'chapters_unlocked'; linkId: number; seriesTitle: string; labels: string[] }
   | { type: 'requests_synced'; added: number };
