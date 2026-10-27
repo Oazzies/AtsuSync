@@ -1,11 +1,12 @@
-import { mkdirSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readdirSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type { ChapterState, DownloadJob, JobState } from '@atsusync/shared';
 import { uploadMangaBakaId } from '../atsu/requests.ts';
 import type { Db } from '../db/client.ts';
 import { events } from '../events.ts';
 import type { LinksRepo } from '../links.ts';
 import type { SourceRegistry } from '../sources/registry.ts';
+import { looksLikeImage, mergeSliverPages, type PageFile } from './fixups.ts';
 import { createZip } from './zip.ts';
 
 interface JobRow {
@@ -35,8 +36,14 @@ const JOB_SELECT = `
 const ACTIVE: JobState[] = ['queued', 'downloading'];
 const PAGE_PARALLELISM = 6;
 
+/** Chapters built by hand from uploaded images have no page on the source site. */
+export const MANUAL_URL_PREFIX = 'manual:';
+export const isManualUrl = (url: string) => url.startsWith(MANUAL_URL_PREFIX);
+
 /** Strip characters Windows/macOS/Linux reject in file names. */
 const safeName = (s: string) => s.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '').slice(0, 80) || 'untitled';
+
+type FinishedRow = { id: number; chapter_id: number; state: JobState; file_path: string | null; prev_chapter_state: ChapterState };
 
 /**
  * Download queue persisted in SQLite: resolve pages → download → bundle into a ZIP under
@@ -60,8 +67,14 @@ export class DownloadPipeline {
     this.db.prepare(`UPDATE upload_jobs SET state = 'queued', progress = 0 WHERE state NOT IN ('queued','done','failed','cancelled')`).run();
   }
 
-  list(limit = 200): DownloadJob[] {
-    return (this.db.prepare(`${JOB_SELECT} ORDER BY j.id DESC LIMIT ?`).all(limit) as unknown as JobRow[]).map((r) => this.toJob(r));
+  list(opts: { linkId?: number; limit?: number } = {}): DownloadJob[] {
+    const { linkId, limit = 500 } = opts;
+    const rows = (
+      linkId === undefined
+        ? this.db.prepare(`${JOB_SELECT} ORDER BY j.id DESC LIMIT ?`).all(limit)
+        : this.db.prepare(`${JOB_SELECT} WHERE j.link_id = ? ORDER BY j.id DESC LIMIT ?`).all(linkId, limit)
+    ) as unknown as JobRow[];
+    return rows.map((r) => this.toJob(r));
   }
 
   get(id: number): DownloadJob | null {
@@ -88,6 +101,7 @@ export class DownloadPipeline {
       const ch = this.links.chapter(chapterId);
       if (!ch) throw new Error(`Unknown chapter ${chapterId}`);
       if (ch.locked) throw new Error(`${ch.label} is locked on the source`);
+      if (isManualUrl(ch.url)) throw new Error(`${ch.label} was added by hand and has no source page; use "Add chapter" to rebuild it`);
       const active = this.db
         .prepare(`SELECT 1 FROM upload_jobs WHERE chapter_id = ? AND state IN (${ACTIVE.map(() => '?').join(',')})`)
         .get(chapterId, ...ACTIVE);
@@ -106,6 +120,104 @@ export class DownloadPipeline {
     jobs.forEach((j) => events.emitEvent({ type: 'job', job: j }));
     this.pump();
     return jobs;
+  }
+
+  /**
+   * Register a chapter built from images the user supplied: it becomes a source chapter on the link
+   * (or fills in an existing one with that number) and a finished download, exactly like a scraped one.
+   */
+  addManual(input: { linkId: number; number: number; label: string; files: PageFile[] }): DownloadJob {
+    const link = this.links.get(input.linkId);
+    if (!link) throw new Error('Unknown link');
+    if (!Number.isFinite(input.number) || input.number < 0) throw new Error('Chapter number must be a positive number');
+    if (input.files.length === 0) throw new Error('Add at least one page');
+    const label = input.label.trim() || `Chapter ${input.number}`;
+
+    const existing = this.db.prepare('SELECT id, state FROM source_chapters WHERE link_id = ? AND number = ?').get(input.linkId, input.number) as
+      | { id: number; state: ChapterState }
+      | undefined;
+    if (existing) {
+      const active = this.db
+        .prepare(`SELECT 1 FROM upload_jobs WHERE chapter_id = ? AND state IN (${ACTIVE.map(() => '?').join(',')})`)
+        .get(existing.id, ...ACTIVE);
+      if (active) throw new Error(`Chapter ${input.number} is being downloaded right now; wait for it or cancel it first`);
+    }
+
+    const now = Date.now();
+    let chapterId: number;
+    let prevState: ChapterState;
+    if (existing) {
+      chapterId = existing.id;
+      prevState = existing.state === 'queued' ? 'known' : existing.state;
+      this.removeJobs(this.finishedRows(`chapter_id = ?`, existing.id));
+      this.db.prepare('UPDATE source_chapters SET label = ? WHERE id = ?').run(label, chapterId);
+    } else {
+      prevState = 'known';
+      const res = this.db
+        .prepare(`INSERT INTO source_chapters (link_id, number, label, url, locked, state, first_seen_at) VALUES (?, ?, ?, ?, 0, 'known', ?)`)
+        .run(input.linkId, input.number, label, `${MANUAL_URL_PREFIX}${now}`, now);
+      chapterId = Number(res.lastInsertRowid);
+    }
+
+    const { path, size } = this.bundle(link.seriesTitle, label, input.files);
+    const log = [`${new Date().toISOString().slice(11, 19)} Built by hand from ${input.files.length} page(s) (${(size / 1024 / 1024).toFixed(1)} MB) at ${path}`];
+    const res = this.db
+      .prepare(
+        `INSERT INTO upload_jobs (link_id, chapter_id, state, progress, total, dry_run, prev_chapter_state, file_path, file_size, log_json, created_at, updated_at)
+         VALUES (?, ?, 'done', ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(input.linkId, chapterId, input.files.length, input.files.length, prevState, path, size, JSON.stringify(log), now, now);
+    this.links.setChapterState([chapterId], 'downloaded');
+    const job = this.get(Number(res.lastInsertRowid))!;
+    events.emitEvent({ type: 'job', job });
+    return job;
+  }
+
+  /**
+   * Delete a link's finished jobs (done / failed / cancelled) and their ZIPs so a re-download starts clean.
+   * Running jobs are left alone. Chapters that were only "downloaded" go back to what they were before;
+   * ones already marked uploaded or skipped keep their state, and hand-built chapters that were never
+   * uploaded disappear along with their ZIP.
+   */
+  clear(linkId: number): { jobs: number; files: number } {
+    return this.removeJobs(this.finishedRows('link_id = ?', linkId));
+  }
+
+  private finishedRows(where: string, arg: number): FinishedRow[] {
+    return this.db
+      .prepare(`SELECT id, chapter_id, state, file_path, prev_chapter_state FROM upload_jobs WHERE ${where} AND state IN ('done','failed','cancelled')`)
+      .all(arg) as unknown as FinishedRow[];
+  }
+
+  private removeJobs(rows: FinishedRow[]): { jobs: number; files: number } {
+    let files = 0;
+    const dirs = new Set<string>();
+    for (const r of rows) {
+      if (!r.file_path) continue;
+      dirs.add(dirname(r.file_path));
+      try {
+        rmSync(r.file_path);
+        files++;
+      } catch {
+        /* already gone */
+      }
+    }
+    for (const d of dirs) {
+      try {
+        if (readdirSync(d).length === 0) rmdirSync(d);
+      } catch {
+        /* not empty or gone */
+      }
+    }
+    // setChapterState opens its own transaction, so these can't be nested in another one.
+    for (const r of rows) {
+      this.db.prepare('DELETE FROM upload_jobs WHERE id = ?').run(r.id);
+      const ch = this.links.chapter(r.chapter_id);
+      if (ch?.state !== 'downloaded') continue;
+      if (isManualUrl(ch.url)) this.db.prepare('DELETE FROM source_chapters WHERE id = ?').run(r.chapter_id);
+      else this.links.setChapterState([r.chapter_id], r.prev_chapter_state === 'downloaded' ? 'known' : r.prev_chapter_state);
+    }
+    return { jobs: rows.length, files };
   }
 
   retry(id: number) {
@@ -142,6 +254,15 @@ export class DownloadPipeline {
     }
   }
 
+  /** Write the chapter ZIP to `<dir>/<series>/<chapter>.zip`. */
+  private bundle(seriesTitle: string, chapterLabel: string, files: PageFile[]): { path: string; size: number } {
+    const seriesDir = join(this.dir, safeName(seriesTitle));
+    mkdirSync(seriesDir, { recursive: true });
+    const path = join(seriesDir, `${safeName(chapterLabel)}.zip`);
+    writeFileSync(path, createZip(files));
+    return { path, size: statSync(path).size };
+  }
+
   private async run(id: number) {
     const job = this.get(id)!;
     const chapter = this.links.chapter(job.chapterId)!;
@@ -160,7 +281,7 @@ export class DownloadPipeline {
       this.update(id, { total: pages.length, progress: 0 });
 
       // Pages download in parallel (the per-host limiter still caps it); results keep page order.
-      const files: { name: string; bytes: Uint8Array }[] = new Array(pages.length);
+      let files: PageFile[] = new Array(pages.length);
       let next = 0;
       let done = 0;
       const worker = async () => {
@@ -170,7 +291,8 @@ export class DownloadPipeline {
             const i = next++;
             const p = pages[i]!;
             const { bytes } = await this.sources.http.bytes(p.url, { headers: p.headers });
-            if (bytes.length < 1024) throw new Error(`Page ${p.name} looks empty (${bytes.length} bytes)`);
+            // Tiny but valid images (blank pages) are fine; only reject error bodies and truncated files.
+            if (bytes.length < 64 || !looksLikeImage(bytes)) throw new Error(`Page ${p.name} is not a valid image (${bytes.length} bytes)`);
             files[i] = { name: p.name, bytes };
             this.update(id, { progress: ++done });
           }
@@ -182,11 +304,10 @@ export class DownloadPipeline {
       await Promise.all(Array.from({ length: Math.min(PAGE_PARALLELISM, pages.length) }, worker));
 
       checkCancel();
-      const seriesDir = join(this.dir, safeName(link.seriesTitle));
-      mkdirSync(seriesDir, { recursive: true });
-      const path = join(seriesDir, `${safeName(chapter.label)}.zip`);
-      writeFileSync(path, createZip(files));
-      const size = statSync(path).size;
+      const fixed = await mergeSliverPages(files);
+      if (fixed.merged > 0) this.log(id, `Joined ${fixed.merged} thin leftover strip(s) onto the pages above them (${files.length} → ${fixed.files.length} pages)`);
+      files = fixed.files;
+      const { path, size } = this.bundle(link.seriesTitle, chapter.label, files);
       this.db.prepare('UPDATE upload_jobs SET file_path = ?, file_size = ? WHERE id = ?').run(path, size, id);
       this.log(id, `Saved ${files.length} pages (${(size / 1024 / 1024).toFixed(1)} MB) to ${path}`);
       this.finish(id, 'done', null);

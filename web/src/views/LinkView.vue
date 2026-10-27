@@ -2,16 +2,18 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { toast } from 'vue-sonner';
-import { ArrowLeft, CheckCheck, Download, ExternalLink, Lock, RefreshCw, SkipForward, Trash2 } from 'lucide-vue-next';
-import type { LinkChapter } from '@atsusync/shared';
+import { ArrowLeft, CheckCheck, ChevronDown, ChevronRight, Download, DownloadCloud, ExternalLink, Lock, Plus, RefreshCw, RotateCcw, SkipForward, Trash2, X } from 'lucide-vue-next';
+import type { DownloadJob, LinkChapter } from '@atsusync/shared';
 import { api, fmtAgo, fmtRanges, useAsync, useServerEvents } from '@/api/client';
 import KindBadge from '@/components/KindBadge.vue';
+import ManualChapter from '@/components/ManualChapter.vue';
 import StatusBadge from '@/components/StatusBadge.vue';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
+import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
@@ -27,6 +29,26 @@ const { data, error, loading, run } = useAsync(() => api.link(props.id));
 const selected = ref(new Set<number>());
 const busy = ref(false);
 const filter = ref<'missing' | 'all'>('missing');
+const jobs = ref<DownloadJob[]>([]);
+const openLogs = ref(new Set<number>());
+const building = ref(false);
+
+const activeJob = (j: DownloadJob) => !['done', 'failed', 'cancelled'].includes(j.state);
+const fmtSize = (bytes: number | null) => (bytes == null ? '' : `${(bytes / 1024 / 1024).toFixed(1)} MB`);
+const readyJobs = computed(() => jobs.value.filter((j) => j.state === 'done'));
+const activeCount = computed(() => jobs.value.filter(activeJob).length);
+async function loadJobs() {
+  try {
+    jobs.value = await api.downloads(props.id);
+  } catch (e) {
+    toast.error((e as Error).message);
+  }
+}
+function toggleLog(id: number) {
+  const s = new Set(openLogs.value);
+  s.has(id) ? s.delete(id) : s.add(id);
+  openLogs.value = s;
+}
 
 const INTERVALS = [15, 30, 60, 120, 360, 720, 1440];
 const fmtInterval = (m: number) => (m < 60 ? `${m} min` : `${m / 60} h`);
@@ -36,7 +58,9 @@ const chapters = computed(() => {
   const all = [...(data.value?.chapters ?? [])].reverse();
   return filter.value === 'missing' ? all.filter((c) => !c.onAtsu && c.state !== 'uploaded' && c.state !== 'skipped') : all;
 });
-const downloadable = (c: LinkChapter) => !c.locked && !c.onAtsu && c.state !== 'queued' && c.state !== 'uploaded';
+const downloadable = (c: LinkChapter) => !c.locked && !c.url.startsWith('manual:') && !c.onAtsu && c.state !== 'queued' && c.state !== 'uploaded';
+// Everything on this page that can still be fetched, whatever the current filter or selection.
+const allDownloadable = computed(() => (data.value?.chapters ?? []).filter((c) => downloadable(c) && c.state !== 'skipped'));
 const allSelected = computed(() => chapters.value.some(downloadable) && chapters.value.filter(downloadable).every((c) => selected.value.has(c.id)));
 
 // Pre-select new chapters Atsumaru doesn't have yet.
@@ -68,11 +92,47 @@ async function act(fn: () => Promise<unknown>) {
 
 const download = () =>
   act(async () => {
-    const jobs = await api.download([...selected.value]);
-    toast.success(`Downloading ${jobs.length} chapter(s)`, {
-      action: { label: 'View', onClick: () => void router.push('/downloads') },
-    });
+    const created = await api.download([...selected.value]);
+    toast.success(`Downloading ${created.length} chapter(s)`);
+    await loadJobs();
   });
+const downloadAll = () =>
+  act(async () => {
+    const created = await api.download(allDownloadable.value.map((c) => c.id));
+    toast.success(`Downloading ${created.length} chapter(s)`);
+    await loadJobs();
+  });
+/** Trigger a browser download for every finished ZIP, one after another. */
+async function saveAllReady() {
+  for (const j of readyJobs.value) {
+    const a = document.createElement('a');
+    a.href = api.downloadFileUrl(j.id);
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+const clearDownloads = () => {
+  const n = jobs.value.filter((j) => !activeJob(j)).length;
+  if (!confirm(`Delete ${n} finished download(s) and their ZIP files? Chapters marked uploaded stay uploaded.`)) return;
+  return act(async () => {
+    const r = await api.clearDownloads(props.id);
+    toast.success(`Cleared ${r.jobs} download(s), deleted ${r.files} file(s)`);
+    await loadJobs();
+  });
+};
+async function manualSaved() {
+  building.value = false;
+  await run();
+  await loadJobs();
+  emit('changed');
+}
+async function markJobUploaded(j: DownloadJob) {
+  await act(() => api.setChapterState([j.chapterId], 'uploaded'));
+  await loadJobs();
+}
 const markUploaded = () =>
   act(async () => {
     await api.setChapterState([...selected.value], 'uploaded');
@@ -97,13 +157,21 @@ async function remove() {
 }
 
 useServerEvents((e) => {
+  if (e.type === 'job' && e.job.linkId === props.id) {
+    const i = jobs.value.findIndex((j) => j.id === e.job.id);
+    if (i === -1) jobs.value.unshift(e.job);
+    else jobs.value[i] = e.job;
+  }
   const mine =
     (e.type === 'job' && e.job.linkId === props.id && ['done', 'failed', 'cancelled'].includes(e.job.state)) ||
     (e.type === 'new_chapters' && e.linkId === props.id);
   if (mine) void run();
 });
 
-onMounted(run);
+onMounted(() => {
+  void run();
+  void loadJobs();
+});
 </script>
 
 <template>
@@ -169,6 +237,8 @@ onMounted(run);
         </Card>
       </div>
 
+      <ManualChapter v-if="building" :link-id="id" @saved="manualSaved" @close="building = false" />
+
       <Card class="py-0">
         <div class="flex flex-wrap items-center gap-2 border-b p-3">
           <Tabs v-model="filter">
@@ -178,13 +248,17 @@ onMounted(run);
             </TabsList>
           </Tabs>
           <div class="flex-1" />
+          <Button variant="outline" size="sm" :disabled="building" @click="building = true"><Plus class="size-4" /> Add chapter</Button>
+          <Button variant="outline" size="sm" :disabled="busy || !allDownloadable.length" @click="downloadAll">
+            <DownloadCloud class="size-4" /> Download all ({{ allDownloadable.length }})
+          </Button>
           <span class="text-sm text-muted-foreground">{{ selected.size }} selected</span>
           <Button variant="outline" size="sm" :disabled="busy || !selected.size" @click="skip"><SkipForward class="size-4" /> Skip</Button>
           <Button variant="outline" size="sm" :disabled="busy || !selected.size" title="After you uploaded them on atsu.moe" @click="markUploaded">
             <CheckCheck class="size-4" /> Mark uploaded
           </Button>
           <Button size="sm" :disabled="busy || !selected.size" @click="download">
-            <Download class="size-4" /> Download
+            <Download class="size-4" /> Download selected
           </Button>
         </div>
         <Table>
@@ -226,6 +300,53 @@ onMounted(run);
             </TableRow>
           </TableBody>
         </Table>
+      </Card>
+
+      <Card v-if="jobs.length" class="gap-0 py-0">
+        <div class="flex flex-wrap items-center gap-2 border-b p-3">
+          <h2 class="font-medium">Downloads</h2>
+          <span v-if="activeCount" class="text-sm text-muted-foreground">{{ activeCount }} in progress</span>
+          <div class="flex-1" />
+          <Button v-if="jobs.length > activeCount" variant="outline" size="sm" :disabled="busy" @click="clearDownloads">
+            <Trash2 class="size-4" /> Clear finished
+          </Button>
+          <Button v-if="readyJobs.length > 1" size="sm" @click="saveAllReady">
+            <Download class="size-4" /> Save all ZIPs ({{ readyJobs.length }})
+          </Button>
+        </div>
+        <div class="divide-y">
+          <div v-for="j in jobs" :key="j.id" class="space-y-2 p-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <Button variant="ghost" size="icon" class="size-7" @click="toggleLog(j.id)">
+                <ChevronDown v-if="openLogs.has(j.id)" class="size-4" /><ChevronRight v-else class="size-4" />
+              </Button>
+              <span class="font-medium">{{ j.chapterLabel }}</span>
+              <StatusBadge :status="j.state" />
+              <span v-if="j.fileSize" class="text-xs text-muted-foreground">{{ fmtSize(j.fileSize) }}</span>
+              <div class="flex-1" />
+              <span class="text-xs text-muted-foreground">{{ fmtAgo(j.updatedAt) }}</span>
+              <Button v-if="activeJob(j)" variant="ghost" size="sm" @click="api.cancelDownload(j.id)"><X class="size-4" /> Cancel</Button>
+              <Button v-if="j.state === 'failed' || j.state === 'cancelled'" variant="outline" size="sm" @click="api.retryDownload(j.id)">
+                <RotateCcw class="size-4" /> Retry
+              </Button>
+              <template v-if="j.state === 'done'">
+                <Button as="a" :href="j.uploadUrl" target="_blank" rel="noopener" variant="outline" size="sm">
+                  Atsumaru upload page <ExternalLink class="size-3" />
+                </Button>
+                <Button variant="outline" size="sm" title="After you submitted it on atsu.moe" @click="markJobUploaded(j)">
+                  <CheckCheck class="size-4" /> Mark uploaded
+                </Button>
+                <Button as="a" :href="api.downloadFileUrl(j.id)" download size="sm"><Download class="size-4" /> ZIP</Button>
+              </template>
+            </div>
+            <div v-if="activeJob(j) && j.total" class="flex items-center gap-3">
+              <Progress :model-value="(j.progress / j.total) * 100" class="h-1.5" />
+              <span class="text-xs text-muted-foreground tabular-nums">{{ j.progress }}/{{ j.total }}</span>
+            </div>
+            <p v-if="j.error" class="text-sm text-destructive">{{ j.error }}</p>
+            <pre v-if="openLogs.has(j.id)" class="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs whitespace-pre-wrap">{{ j.log.join('\n') }}</pre>
+          </div>
+        </div>
       </Card>
     </template>
   </div>

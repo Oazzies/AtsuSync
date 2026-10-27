@@ -24,7 +24,8 @@ export interface SourceAdapter {
   /** Politeness budget, applied per host by SourceHttp. */
   rateLimit: { rpm: number; concurrency: number };
 
-  search(title: string, http: SourceHttp): Promise<SourceSeriesHit[]>;
+  /** Omit for sites that can't be searched (e.g. robots.txt forbids it); they can still be linked by URL. */
+  search?(title: string, http: SourceHttp): Promise<SourceSeriesHit[]>;
   getSeries(url: string, http: SourceHttp): Promise<SourceSeries>;
   /** Resolve pages right before downloading — some hosts sign URLs with short expiries. */
   getChapterPages(chapter: SourceChapter, http: SourceHttp): Promise<PageRef[]>;

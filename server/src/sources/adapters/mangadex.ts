@@ -67,15 +67,25 @@ export function parseSearch(json: { data?: MdManga[] }): SourceSeriesHit[] {
 /**
  * English chapters only. Several groups often upload the same chapter number; Atsu tracks one
  * entry per number, so keep a single deterministic pick (most pages, then earliest upload).
- * External-link chapters (no hosted pages) and chapters without a number (oneshots) are skipped.
+ * External-link chapters (no hosted pages) are skipped. Unnumbered chapters are skipped too,
+ * except in a series with no numbered chapters at all (a oneshot), where they count as chapter 1.
  */
 export function parseFeed(chapters: MdChapter[]): SourceChapter[] {
-  const best = new Map<number, MdChapter>();
-  for (const c of chapters) {
+  const usable = chapters.filter((c) => {
     const a = c.attributes;
-    if (a.translatedLanguage !== LANG || a.externalUrl || a.isUnavailable || a.pages <= 0) continue;
-    const n = Number(a.chapter);
-    if (a.chapter == null || a.chapter === '' || !Number.isFinite(n)) continue;
+    return a.translatedLanguage === LANG && !a.externalUrl && !a.isUnavailable && a.pages > 0;
+  });
+  const numberOf = (c: MdChapter): number | null => {
+    const raw = c.attributes.chapter;
+    const n = Number(raw);
+    return raw == null || raw === '' || !Number.isFinite(n) ? null : n;
+  };
+  const oneshot = usable.every((c) => numberOf(c) === null);
+  const best = new Map<number, MdChapter>();
+  for (const c of usable) {
+    const a = c.attributes;
+    const n = numberOf(c) ?? (oneshot ? 1 : null);
+    if (n === null) continue;
     const cur = best.get(n)?.attributes;
     if (!cur || a.pages > cur.pages || (a.pages === cur.pages && a.publishAt < cur.publishAt)) best.set(n, c);
   }

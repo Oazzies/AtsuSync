@@ -15,6 +15,7 @@ import { Discovery } from './sources/discovery.ts';
 import { SourceRegistry } from './sources/registry.ts';
 import { SourceHttp } from './sources/http.ts';
 import type { SourceAdapter } from './sources/types.ts';
+import { Drafts, mimeFor } from './upload/drafts.ts';
 import { DownloadPipeline } from './upload/pipeline.ts';
 import { Watcher } from './watcher/watcher.ts';
 
@@ -36,11 +37,17 @@ export function buildApp(opts: AppOptions) {
   const sources = new SourceRegistry(db, opts.adapters, new SourceHttp(opts.fetchImpl));
   const discovery = new Discovery(db, sources);
   const links = new LinksRepo(db, sources);
-  const pipeline = new DownloadPipeline(db, links, sources, opts.downloadsDir ?? join(dirname(opts.dbFile), 'downloads'));
+  const downloadsDir = opts.downloadsDir ?? join(dirname(opts.dbFile), 'downloads');
+  const pipeline = new DownloadPipeline(db, links, sources, downloadsDir);
+  const drafts = new Drafts(join(downloadsDir, '.drafts'));
   const watcher = new Watcher(links, sources, atsu);
   const presence = new PresenceChecker(atsu, requests);
 
   const app = Fastify({ logger: { level: 'info', transport: undefined } });
+
+  // Images for hand-built chapters arrive as raw bodies, one request per file.
+  const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
+  app.addContentTypeParser(/^(image\/.+|application\/octet-stream)$/, { parseAs: 'buffer', bodyLimit: MAX_IMAGE_BYTES }, (_req, body, done) => done(null, body));
 
   app.setErrorHandler((err, _req, reply) => {
     const e = err as { statusCode?: number; message: string };
@@ -110,8 +117,9 @@ export function buildApp(opts: AppOptions) {
     sources.setEnabled(req.params.id, !!req.body.enabled);
     return sources.info();
   });
-  app.post<{ Params: { id: string }; Body: { query?: string } }>('/api/sources/:id/test', async (req) => {
+  app.post<{ Params: { id: string }; Body: { query?: string } }>('/api/sources/:id/test', async (req, reply) => {
     const adapter = sources.get(req.params.id);
+    if (!adapter.search) return reply.code(400).send({ error: `${adapter.name} can't be searched; link its series by URL` });
     const started = Date.now();
     const hits = await adapter.search(req.body?.query || 'a', sources.http);
     return { ok: hits.length > 0, hits: hits.slice(0, 5), ms: Date.now() - started };
@@ -156,8 +164,14 @@ export function buildApp(opts: AppOptions) {
   });
 
   // ---- Downloads (chapter ZIPs the user uploads to atsu.moe by hand) ----
-  app.get('/api/downloads', async () => pipeline.list());
+  app.get<{ Querystring: { linkId?: string } }>('/api/downloads', async (req) =>
+    pipeline.list({ linkId: req.query.linkId ? Number(req.query.linkId) : undefined }),
+  );
   app.post<{ Body: { chapterIds: number[] } }>('/api/downloads', async (req) => pipeline.enqueue(req.body.chapterIds));
+  app.delete<{ Querystring: { linkId?: string } }>('/api/downloads', async (req) => {
+    if (!req.query.linkId) throw Object.assign(new Error('linkId is required'), { statusCode: 400 });
+    return pipeline.clear(Number(req.query.linkId));
+  });
   app.post<{ Params: { id: string } }>('/api/downloads/:id/retry', async (req) => {
     pipeline.retry(Number(req.params.id));
     return pipeline.get(Number(req.params.id));
@@ -173,6 +187,45 @@ export function buildApp(opts: AppOptions) {
       .header('content-type', 'application/zip')
       .header('content-disposition', `attachment; filename="${file.name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(file.name)}`)
       .send(createReadStream(file.path));
+  });
+
+  // ---- Hand-built chapters: upload images → preview the stitched result → save as a download ----
+  const autoJoin = (q: { autoJoin?: string }) => q.autoJoin !== '0';
+  app.post('/api/manual/drafts', async () => drafts.create());
+  app.get<{ Params: { id: string } }>('/api/manual/drafts/:id', async (req) => drafts.get(req.params.id));
+  app.delete<{ Params: { id: string } }>('/api/manual/drafts/:id', async (req) => {
+    drafts.discard(req.params.id);
+    return { ok: true };
+  });
+  app.post<{ Params: { id: string }; Querystring: { name?: string } }>(
+    '/api/manual/drafts/:id/pages',
+    { bodyLimit: MAX_IMAGE_BYTES },
+    async (req) => drafts.addPage(req.params.id, req.query.name || 'page.jpg', req.body as Buffer),
+  );
+  app.put<{ Params: { id: string }; Body: { order?: string[]; joins?: Record<string, boolean>; sortByName?: boolean } }>(
+    '/api/manual/drafts/:id',
+    async (req) => drafts.update(req.params.id, req.body ?? {}),
+  );
+  app.delete<{ Params: { id: string; pageId: string } }>('/api/manual/drafts/:id/pages/:pageId', async (req) =>
+    drafts.removePage(req.params.id, req.params.pageId),
+  );
+  app.get<{ Params: { id: string; pageId: string } }>('/api/manual/drafts/:id/pages/:pageId/image', async (req, reply) => {
+    const f = drafts.pageFile(req.params.id, req.params.pageId);
+    return reply.header('content-type', mimeFor(f.name)).header('cache-control', 'no-store').send(Buffer.from(f.bytes));
+  });
+  app.get<{ Params: { id: string }; Querystring: { autoJoin?: string } }>('/api/manual/drafts/:id/preview', async (req) =>
+    drafts.preview(req.params.id, { autoJoin: autoJoin(req.query) }),
+  );
+  app.get<{ Params: { id: string; index: string }; Querystring: { autoJoin?: string } }>('/api/manual/drafts/:id/preview/:index', async (req, reply) => {
+    const f = await drafts.previewImage(req.params.id, Number(req.params.index), { autoJoin: autoJoin(req.query) });
+    return reply.header('content-type', mimeFor(f.name)).header('cache-control', 'no-store').send(Buffer.from(f.bytes));
+  });
+  app.post<{ Params: { id: string }; Body: { linkId: number; number: number; label?: string; autoJoin?: boolean } }>('/api/manual/drafts/:id/commit', async (req) => {
+    const { linkId, number, label, autoJoin: join_ } = req.body;
+    const files = await drafts.build(req.params.id, { autoJoin: join_ !== false });
+    const job = pipeline.addManual({ linkId, number: Number(number), label: label ?? '', files });
+    drafts.discard(req.params.id);
+    return job;
   });
 
   // ---- Live events (SSE) ----

@@ -55,6 +55,11 @@ describe('mangadex adapter', () => {
     ]);
   });
 
+  it('treats unnumbered chapters as chapter 1 only for oneshots', () => {
+    const out = parseFeed([ch('a', null, { pages: 10 }), ch('b', null, { pages: 51 })]);
+    expect(out.map((c) => [c.number, c.url.split('/').pop()])).toEqual([[1, 'b']]);
+  });
+
   it('explains why a series with no english chapters is empty', () => {
     const manga = (langs?: string[]) => ({ id: 'x', attributes: { title: { en: 'X' }, availableTranslatedLanguages: langs } });
     expect(emptyReason(manga(['id', 'es']))).toBe('no English chapters (only id, es)');

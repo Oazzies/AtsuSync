@@ -18,7 +18,12 @@ const GROUPS: { kind: SourceKind; title: string; description: string }[] = [
   {
     kind: 'aggregator',
     title: 'Aggregators',
-    description: 'Re-host other releases (e.g. official Webtoon). Use when the series is official-only or the group has no site.',
+    description: "Re-host other groups' releases. Use when the group has no site of its own.",
+  },
+  {
+    kind: 'official',
+    title: 'Official platforms',
+    description: "The publisher's own site, free chapters only (paid ones are skipped). Not searchable: link a series by pasting its URL.",
   },
 ];
 const byKind = computed(() => Object.fromEntries(GROUPS.map((g) => [g.kind, sources.value.filter((s) => s.kind === g.kind)])));
@@ -73,7 +78,7 @@ onMounted(load);
               {{ results[s.id]!.text }}
             </p>
           </div>
-          <Button variant="outline" size="sm" @click="test(s)"><Stethoscope class="size-4" /> Test</Button>
+          <Button v-if="s.searchable" variant="outline" size="sm" @click="test(s)"><Stethoscope class="size-4" /> Test</Button>
         </div>
       </CardContent>
     </Card>

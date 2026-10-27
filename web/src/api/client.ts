@@ -62,12 +62,56 @@ export const api = {
   setChapterState: (chapterIds: number[], state: 'skipped' | 'known' | 'pending' | 'uploaded') =>
     call<{ ok: true }>('POST', '/chapters/state', { chapterIds, state }),
 
-  downloads: () => call<DownloadJob[]>('GET', '/downloads'),
+  downloads: (linkId?: number) => call<DownloadJob[]>('GET', linkId === undefined ? '/downloads' : `/downloads?linkId=${linkId}`),
   download: (chapterIds: number[]) => call<DownloadJob[]>('POST', '/downloads', { chapterIds }),
+  clearDownloads: (linkId: number) => call<{ jobs: number; files: number }>('DELETE', `/downloads?linkId=${linkId}`),
   retryDownload: (id: number) => call<DownloadJob>('POST', `/downloads/${id}/retry`),
   cancelDownload: (id: number) => call<DownloadJob>('POST', `/downloads/${id}/cancel`),
   downloadFileUrl: (id: number) => `/api/downloads/${id}/file`,
+
+  // Hand-built chapters
+  createDraft: () => call<DraftView>('POST', '/manual/drafts'),
+  discardDraft: (id: string) => call<{ ok: true }>('DELETE', `/manual/drafts/${id}`),
+  addDraftPage: async (id: string, file: File): Promise<DraftView> => {
+    const res = await fetch(`/api/manual/drafts/${id}/pages?name=${encodeURIComponent(file.name)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: file,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as { error?: string }).error ?? `${res.status} ${res.statusText}`);
+    return data as DraftView;
+  },
+  updateDraft: (id: string, patch: { order?: string[]; joins?: Record<string, boolean>; sortByName?: boolean }) =>
+    call<DraftView>('PUT', `/manual/drafts/${id}`, patch),
+  removeDraftPage: (id: string, pageId: string) => call<DraftView>('DELETE', `/manual/drafts/${id}/pages/${pageId}`),
+  draftPageUrl: (id: string, pageId: string) => `/api/manual/drafts/${id}/pages/${pageId}/image`,
+  draftPreview: (id: string, autoJoin: boolean) => call<DraftPreviewPage[]>('GET', `/manual/drafts/${id}/preview?autoJoin=${autoJoin ? 1 : 0}`),
+  draftPreviewUrl: (id: string, index: number, autoJoin: boolean, v: number) =>
+    `/api/manual/drafts/${id}/preview/${index}?autoJoin=${autoJoin ? 1 : 0}&v=${v}`,
+  commitDraft: (id: string, body: { linkId: number; number: number; label: string; autoJoin: boolean }) =>
+    call<DownloadJob>('POST', `/manual/drafts/${id}/commit`, body),
 };
+
+export interface DraftPage {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  size: number;
+  joinPrev: boolean;
+}
+export interface DraftView {
+  id: string;
+  pages: DraftPage[];
+}
+export interface DraftPreviewPage {
+  index: number;
+  name: string;
+  width: number;
+  height: number;
+  parts: number;
+}
 
 // ---- Server-sent events: one shared EventSource for the whole app ----
 type Listener = (e: ServerEvent) => void;

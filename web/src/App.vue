@@ -2,27 +2,24 @@
 import { onMounted, ref } from 'vue';
 import { RouterLink, RouterView } from 'vue-router';
 import { toast } from 'vue-sonner';
-import { Bell, Download, Globe, Inbox, Settings } from 'lucide-vue-next';
+import { Bell, Globe, Inbox, Settings } from 'lucide-vue-next';
 import { Toaster } from '@/components/ui/sonner';
 import { Badge } from '@/components/ui/badge';
 import { api, connected, useServerEvents } from '@/api/client';
 
 const pending = ref(0);
-const activeJobs = ref(0);
 const user = ref<string | null>(null);
 
 const nav = [
   { to: '/', label: 'Requests', icon: Inbox, count: () => 0 },
   { to: '/tracked', label: 'Tracked', icon: Bell, count: () => pending.value },
-  { to: '/downloads', label: 'Downloads', icon: Download, count: () => activeJobs.value },
   { to: '/sources', label: 'Sources', icon: Globe, count: () => 0 },
   { to: '/settings', label: 'Settings', icon: Settings, count: () => 0 },
 ];
 
 async function refreshCounts() {
-  const [links, jobs, settings] = await Promise.all([api.links(), api.downloads(), api.settings()]).catch(() => [[], [], null] as const);
+  const [links, settings] = await Promise.all([api.links(), api.settings()]).catch(() => [[], null] as const);
   pending.value = links.reduce((n, l) => n + l.pendingCount, 0);
-  activeJobs.value = jobs.filter((j) => !['done', 'failed', 'cancelled'].includes(j.state)).length;
   user.value = settings?.atsuUser ?? null;
 }
 
@@ -34,7 +31,7 @@ useServerEvents((e) => {
     }
   }
   if (e.type === 'job' && e.job.state === 'failed') toast.error(`Download failed: ${e.job.seriesTitle} ${e.job.chapterLabel}`, { description: e.job.error ?? undefined });
-  if (e.type === 'job' && e.job.state === 'done') toast.success(`Ready: ${e.job.seriesTitle} ${e.job.chapterLabel}`, { description: 'Download it from the Downloads page.' });
+  if (e.type === 'job' && e.job.state === 'done') toast.success(`Ready: ${e.job.seriesTitle} ${e.job.chapterLabel}`, { description: 'Save it from the series page.' });
   void refreshCounts();
 });
 

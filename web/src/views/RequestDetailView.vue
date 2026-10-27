@@ -235,6 +235,7 @@ onMounted(load);
               <TabsTrigger value="all">All</TabsTrigger>
               <TabsTrigger value="scanlation">Scanlation</TabsTrigger>
               <TabsTrigger value="aggregator">Aggregator</TabsTrigger>
+              <TabsTrigger value="official">Official</TabsTrigger>
             </TabsList>
           </Tabs>
 

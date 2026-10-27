@@ -1,12 +1,15 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import sharp from 'sharp';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SourceChapter } from '@atsusync/shared';
 import { buildApp } from '../src/app.ts';
 import type { SourceAdapter } from '../src/sources/types.ts';
 
+// PNG signature followed by filler, so it passes the image check.
 const PAGE = new Uint8Array(4096).fill(7);
+PAGE.set([0x89, 0x50, 0x4e, 0x47]);
 
 function fakeAdapter(chapters: { current: SourceChapter[] }): SourceAdapter {
   return {
@@ -117,6 +120,67 @@ describe('download pipeline', () => {
     expect(zip.readUInt16LE(zip.length - 12)).toBe(2); // entries in the end-of-central-directory record
     expect(zip.includes(Buffer.from('001.webp'))).toBe(true);
     expect(zip.includes(Buffer.from('002.webp'))).toBe(true);
+  });
+
+  it('clearing a link deletes finished jobs and ZIPs and makes chapters downloadable again', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
+    const [c1, c2] = t.links.chapters(link.id);
+
+    t.pipeline.enqueue([c1!.id, c2!.id]);
+    const jobs = await waitForJobs(t.pipeline);
+    const files = jobs.map((j) => t.pipeline.file(j.id)!.path);
+    t.links.setChapterState([c2!.id], 'uploaded');
+
+    expect(t.pipeline.clear(link.id)).toEqual({ jobs: 2, files: 2 });
+    expect(t.pipeline.list({ linkId: link.id })).toEqual([]);
+    expect(files.every((f) => !existsSync(f))).toBe(true);
+    expect(t.links.chapters(link.id).map((c) => c.state)).toEqual(['known', 'uploaded']);
+  });
+
+  it('builds a chapter from uploaded images: preview, strip joining, ZIP, and clean-up', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
+    const jpg = (h: number) => sharp({ create: { width: 800, height: h, channels: 3, background: '#999' } }).jpeg().toBuffer();
+    const json = (r: { payload: string }) => JSON.parse(r.payload);
+
+    const draft = json(await t.app.inject({ method: 'POST', url: '/api/manual/drafts' }));
+    // Uploaded out of order on purpose; "sortByName" puts them right.
+    for (const [name, h] of [['p3.jpg', 1000], ['p1.jpg', 1067], ['p2.jpg', 65]] as const) {
+      const res = await t.app.inject({
+        method: 'POST',
+        url: `/api/manual/drafts/${draft.id}/pages?name=${name}`,
+        headers: { 'content-type': 'application/octet-stream' },
+        payload: await jpg(h),
+      });
+      expect(res.statusCode).toBe(200);
+    }
+    const bad = await t.app.inject({ method: 'POST', url: `/api/manual/drafts/${draft.id}/pages?name=x.jpg`, headers: { 'content-type': 'application/octet-stream' }, payload: Buffer.from('not an image at all, just text') });
+    expect(bad.statusCode).toBe(400);
+
+    const sorted = json(await t.app.inject({ method: 'PUT', url: `/api/manual/drafts/${draft.id}`, payload: { sortByName: true } }));
+    expect(sorted.pages.map((p: { name: string }) => p.name)).toEqual(['p1.jpg', 'p2.jpg', 'p3.jpg']);
+
+    const preview = json(await t.app.inject({ method: 'GET', url: `/api/manual/drafts/${draft.id}/preview` }));
+    expect(preview.map((p: { height: number; parts: number }) => [p.height, p.parts])).toEqual([[1132, 2], [1000, 1]]);
+    const raw = json(await t.app.inject({ method: 'GET', url: `/api/manual/drafts/${draft.id}/preview?autoJoin=0` }));
+    expect(raw).toHaveLength(3);
+    const img = await t.app.inject({ method: 'GET', url: `/api/manual/drafts/${draft.id}/preview/0` });
+    expect(img.headers['content-type']).toBe('image/jpeg');
+
+    const job = json(await t.app.inject({ method: 'POST', url: `/api/manual/drafts/${draft.id}/commit`, payload: { linkId: link.id, number: 3.5, label: 'Chapter 3.5 - Extra' } }));
+    expect(job).toMatchObject({ state: 'done', total: 2, chapterLabel: 'Chapter 3.5 - Extra', uploadUrl: 'https://atsu.moe/upload?mb=1' });
+    const added = t.links.chapters(link.id).find((c) => c.number === 3.5)!;
+    expect(added).toMatchObject({ label: 'Chapter 3.5 - Extra', state: 'downloaded', locked: false });
+    expect(t.pipeline.file(job.id)!.name).toBe('Heart Aching - Chapter 3.5 - Extra.zip');
+    expect((await t.app.inject({ method: 'GET', url: `/api/manual/drafts/${draft.id}` })).statusCode).toBe(404);
+    expect(() => t.pipeline.enqueue([added.id])).toThrow(/added by hand/);
+
+    // Clearing removes the hand-built chapter entirely, since it can't be re-fetched.
+    t.pipeline.clear(link.id);
+    expect(t.links.chapters(link.id).some((c) => c.number === 3.5)).toBe(false);
   });
 
   it('a failed download restores the chapter state', async () => {

@@ -7,7 +7,7 @@ defineProps<{ kind: SourceKind }>();
 </script>
 
 <template>
-  <Badge variant="outline" :class="tone(kind === 'scanlation' ? 'success' : 'warning')">
-    {{ kind === 'scanlation' ? 'Scanlation' : 'Aggregator' }}
+  <Badge variant="outline" :class="tone(kind === 'scanlation' ? 'success' : kind === 'official' ? 'info' : 'warning')">
+    {{ kind === 'scanlation' ? 'Scanlation' : kind === 'official' ? 'Official' : 'Aggregator' }}
   </Badge>
 </template>

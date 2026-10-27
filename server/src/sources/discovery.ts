@@ -51,7 +51,7 @@ export class Discovery {
   async find(req: ContentRequest): Promise<SourceMatch[]> {
     const titles = await this.titlesFor(req);
     const queries = searchQueries(titles);
-    const results = await Promise.all(this.sources.enabled().map((a) => this.searchOne(a, titles, queries)));
+    const results = await Promise.all(this.sources.enabled().filter((a) => a.search).map((a) => this.searchOne(a, titles, queries)));
     const rows = results.flat().map((m) => ({ ...m, request_id: req.id }));
     tx(this.db, () => {
       this.db.prepare('DELETE FROM source_matches WHERE request_id = ?').run(req.id);
@@ -87,7 +87,7 @@ export class Discovery {
     try {
       const hits = new Map<string, SourceSeriesHit>();
       for (const q of queries) {
-        for (const h of await adapter.search(q, this.sources.http)) if (!hits.has(h.url)) hits.set(h.url, h);
+        for (const h of await adapter.search!(q, this.sources.http)) if (!hits.has(h.url)) hits.set(h.url, h);
       }
       const scored = [...hits.values()]
         .map((h) => ({ h, score: bestScore(titles, [h.title, ...(h.altTitles ?? [])]) }))

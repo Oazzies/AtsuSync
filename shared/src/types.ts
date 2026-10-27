@@ -74,8 +74,8 @@ export interface RequestComment {
   claim: boolean;
 }
 
-/** Scanlation = the group's own site; aggregator = re-hosts other groups' or official releases. */
-export type SourceKind = 'scanlation' | 'aggregator';
+/** Scanlation = the group's own site; aggregator = re-hosts other groups' or official releases; official = the publisher's own platform. */
+export type SourceKind = 'scanlation' | 'aggregator' | 'official';
 
 export interface SourceInfo {
   id: string;
@@ -83,6 +83,8 @@ export interface SourceInfo {
   baseUrl: string;
   kind: SourceKind;
   enabled: boolean;
+  /** False for sources that can only be linked by pasting a series URL. */
+  searchable: boolean;
 }
 
 export interface SourceChapter {

@@ -13,7 +13,7 @@ const router = createRouter({
     { path: '/requests/:id', name: 'request', component: () => import('./views/RequestDetailView.vue'), props: true },
     { path: '/links/:id', name: 'link', component: () => import('./views/LinkView.vue'), props: (r) => ({ id: Number(r.params.id) }) },
     { path: '/tracked', name: 'tracked', component: () => import('./views/TrackedView.vue') },
-    { path: '/downloads', name: 'downloads', component: () => import('./views/DownloadsView.vue') },
+    { path: '/downloads', redirect: '/tracked' },
     { path: '/sources', name: 'sources', component: () => import('./views/SourcesView.vue') },
     { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue') },
   ],

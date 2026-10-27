@@ -9,7 +9,7 @@ describe('live', () => {
   http.configureHost('nuviatoon.net', nuviatoon.rateLimit);
 
   it('nuviatoon search + series still parse', async () => {
-    const hits = await nuviatoon.search('Heart Aching', http);
+    const hits = await nuviatoon.search!('Heart Aching', http);
     expect(hits.some((h) => h.url.endsWith('/comics/heart-aching'))).toBe(true);
     await expect(http.assertAllowed('https://nuviatoon.net/search?q=x')).rejects.toThrow(/robots/);
     const s = await nuviatoon.getSeries('https://nuviatoon.net/comics/heart-aching', http);
