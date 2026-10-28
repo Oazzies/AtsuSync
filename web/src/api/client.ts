@@ -43,6 +43,7 @@ export const api = {
   syncRequests: (full = false) => call<{ added: number; updated: number }>('POST', `/requests/sync${full ? '?full=1' : ''}`),
   request: (id: string) =>
     call<{ request: ContentRequest; mangabaka: MangaBaka | null; matches: SourceMatch[]; links: Link[] }>('GET', `/requests/${id}`),
+  addSeries: (url: string) => call<ContentRequest>('POST', '/series', { url }),
   requestAtsu: (id: string) => call<AtsuSeriesState>('GET', `/requests/${id}/atsu`),
   comments: (id: string) => call<RequestComment[]>('GET', `/requests/${id}/comments`),
   checkPresence: (id: string) => call<AtsuPresence>('POST', `/requests/${id}/presence`),

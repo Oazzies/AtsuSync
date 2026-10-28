@@ -269,3 +269,26 @@ describe('discovery', () => {
     expect((await t.discovery.find(req)).map((m) => m.chapterCount)).toEqual([1]);
   });
 });
+
+describe('existing Atsumaru series', () => {
+  it('can be added by link, linked to a source, and downloaded for its manga id', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const doc = { id: 'YwMX0', title: 'Heart Aching', otherNames: ['Alt Name'], synopsis: 'x', posterMedium: '/static/p.avif', chapterCount: 1 };
+    const origFetch = (t.atsu as any).fetchImpl as ReturnType<typeof vi.fn>;
+    (t.atsu as any).fetchImpl = async (input: string | URL, init?: RequestInit) =>
+      String(input).includes('/collections/manga/documents/search')
+        ? new Response(JSON.stringify({ hits: String(input).includes('YwMX0') ? [{ document: doc }] : [] }))
+        : origFetch(input, init);
+
+    const res = await t.app.inject({ method: 'POST', url: '/api/series', payload: { url: 'https://atsu.moe/manga/YwMX0' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ id: 'atsu:YwMX0', atsuMangaId: 'YwMX0', altTitles: ['Alt Name'], cover: 'https://atsu.moe/static/p.avif', uploadable: false });
+    expect((await t.app.inject({ method: 'POST', url: '/api/series', payload: { url: 'https://atsu.moe/manga/nope' } })).statusCode).toBe(404);
+
+    const link = await t.links.create({ requestId: 'atsu:YwMX0', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', atsuMangaId: 'YwMX0', checkIntervalMin: 60 });
+    t.pipeline.enqueue([t.links.chapters(link.id)[0]!.id]);
+    const [job] = await waitForJobs(t.pipeline);
+    expect(job!.uploadUrl).toBe('https://atsu.moe/upload?manga=YwMX0');
+  });
+});

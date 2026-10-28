@@ -45,7 +45,7 @@ export class Discovery {
   }
 
   async titlesFor(req: ContentRequest): Promise<string[]> {
-    const titles = [req.title];
+    const titles = [req.title, ...req.altTitles];
     if (req.mangabakaId) {
       const mb = await getMangaBakaSeries(req.mangabakaId).catch(() => null);
       if (mb) titles.push(mb.title, ...mb.titles);

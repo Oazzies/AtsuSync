@@ -160,7 +160,7 @@ async function remove() {
   const requestId = link.value?.requestId;
   await api.deleteLink(props.id);
   emit('changed');
-  await router.push(requestId ? `/requests/${requestId}` : '/tracked');
+  await router.push(requestId ? `/requests/${encodeURIComponent(requestId)}` : '/tracked');
 }
 
 useServerEvents((e) => {
@@ -188,7 +188,7 @@ onMounted(() => {
       variant="ghost"
       size="sm"
       class="-ml-2 text-muted-foreground"
-      @click="router.push(`/requests/${link.requestId}`)"
+      @click="router.push(`/requests/${encodeURIComponent(link.requestId)}`)"
     >
       <ArrowLeft class="size-4" /> {{ link.requestTitle }}
     </Button>

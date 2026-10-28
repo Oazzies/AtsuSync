@@ -108,4 +108,10 @@ export const migrations: string[] = [
   -- A download can fetch its chapter from a different site than the link's without rewriting the chapter row.
   ALTER TABLE upload_jobs ADD COLUMN source_url TEXT;
   `,
+  `
+  -- Series already on Atsumaru can be added directly (as a request row with id 'atsu:<mangaId>').
+  ALTER TABLE requests ADD COLUMN atsu_manga_id TEXT;
+  ALTER TABLE requests ADD COLUMN alt_titles_json TEXT;
+  ALTER TABLE requests ADD COLUMN cover TEXT;
+  `,
 ];

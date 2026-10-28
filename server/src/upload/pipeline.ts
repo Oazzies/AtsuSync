@@ -28,10 +28,11 @@ interface JobRow {
   source_id: string;
   content: string;
   mangabaka_id: string | null;
+  atsu_manga_id: string | null;
 }
 
 const JOB_SELECT = `
-  SELECT j.*, c.label AS chapter_label, l.series_title, l.source_id, r.content, r.mangabaka_id
+  SELECT j.*, c.label AS chapter_label, l.series_title, l.source_id, r.content, r.mangabaka_id, COALESCE(l.atsu_manga_id, r.atsu_manga_id) AS atsu_manga_id
   FROM upload_jobs j JOIN source_chapters c ON c.id = j.chapter_id JOIN links l ON l.id = j.link_id JOIN requests r ON r.id = l.request_id`;
 
 const ACTIVE: JobState[] = ['queued', 'downloading'];
@@ -403,7 +404,11 @@ export class DownloadPipeline {
       createdAt: r.created_at,
       updatedAt: r.updated_at,
       fileSize: r.state === 'done' ? r.file_size : null,
-      uploadUrl: mb ? `https://atsu.moe/upload?mb=${encodeURIComponent(mb)}` : 'https://atsu.moe/upload',
+      uploadUrl: r.atsu_manga_id
+        ? `https://atsu.moe/upload?manga=${encodeURIComponent(r.atsu_manga_id)}`
+        : mb
+          ? `https://atsu.moe/upload?mb=${encodeURIComponent(mb)}`
+          : 'https://atsu.moe/upload',
     };
   }
 }

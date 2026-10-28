@@ -1,7 +1,7 @@
 import type { AtsuPresence, ContentRequest, RequestStatus, RequestTag, TrackerLink } from '@atsusync/shared';
 import type { Db } from '../db/client.ts';
 import { tx } from '../db/client.ts';
-import { ATSU_BASE, CONTENT_REQUESTS_PATH, type AtsuClient, type AtsuPost } from './client.ts';
+import { ATSU_BASE, CONTENT_REQUESTS_PATH, type AtsuClient, type AtsuPost, type AtsuSeriesInfo } from './client.ts';
 
 const STATUS_BY_TAG: Record<string, RequestStatus> = {
   added: 'added',
@@ -83,21 +83,29 @@ interface RequestRow {
   created_at: number;
   section_id: string | null;
   presence_json: string | null;
+  atsu_manga_id: string | null;
+  alt_titles_json: string | null;
+  cover: string | null;
   link_count?: number;
 }
+
+export const atsuSeriesRequestId = (mangaId: string) => `atsu:${mangaId}`;
 
 function rowToRequest(r: RequestRow): ContentRequest {
   return {
     id: r.id,
     title: r.title,
     content: r.content,
-    url: postUrl(r.id),
+    url: r.atsu_manga_id ? `${ATSU_BASE}/manga/${r.atsu_manga_id}` : postUrl(r.id),
     authorName: r.author_name,
     tags: JSON.parse(r.tags_json) as RequestTag[],
     status: r.status,
     kind: r.kind,
     trackers: JSON.parse(r.trackers_json) as TrackerLink[],
     mangabakaId: r.mangabaka_id,
+    atsuMangaId: r.atsu_manga_id,
+    altTitles: r.alt_titles_json ? (JSON.parse(r.alt_titles_json) as string[]) : [],
+    cover: r.cover,
     commentCount: r.comment_count,
     score: r.score,
     createdAt: r.created_at,
@@ -142,6 +150,21 @@ export class RequestsRepo {
         p.sectionId ?? null,
       );
     return existed ? 'updated' : 'inserted';
+  }
+
+  /** Track a series that is already on Atsumaru; it is stored like a request so sources, links and downloads work the same. */
+  upsertAtsuSeries(s: AtsuSeriesInfo): ContentRequest {
+    const id = atsuSeriesRequestId(s.id);
+    this.db
+      .prepare(
+        `INSERT INTO requests (id, title, content, author_name, tags_json, status, kind, trackers_json, mangabaka_id,
+           comment_count, score, created_at, synced_at, atsu_manga_id, alt_titles_json, cover)
+         VALUES (?, ?, ?, NULL, '[]', 'added', NULL, '[]', NULL, 0, 0, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, synced_at = excluded.synced_at,
+           alt_titles_json = excluded.alt_titles_json, cover = excluded.cover`,
+      )
+      .run(id, s.title, s.synopsis, Date.now(), Date.now(), s.id, JSON.stringify(s.altTitles), s.cover);
+    return this.get(id)!;
   }
 
   sectionId(id: string): string | null {

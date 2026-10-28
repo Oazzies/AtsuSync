@@ -25,6 +25,10 @@ export interface ContentRequest {
   kind: 'new_series' | 'new_source' | null;
   trackers: TrackerLink[];
   mangabakaId: string | null;
+  /** Set for a series added straight from atsu.moe/manga/<id> instead of a forum post (`id` is `atsu:<mangaId>`). */
+  atsuMangaId: string | null;
+  altTitles: string[];
+  cover: string | null;
   commentCount: number;
   score: number;
   createdAt: number;

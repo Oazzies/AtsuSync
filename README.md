@@ -6,6 +6,7 @@ Local helper for uploading to Atsumaru [content requests](https://atsu.moe/socia
 - On a request, **Find sources** searches the enabled scanlation sites once (with the tracker's alt titles) and shows chapter counts. Nothing is scraped in the background except linked series.
 - Check the series on the site yourself, then **Link** it. The chapter list shows what Atsumaru is missing.
 - Linked series are re-checked on an interval. New chapters show up under **Tracked** (plus a desktop notification) and wait for you to **Download** or **Skip**.
+- Series that already exist on Atsumaru need no content request: on **Requests → Existing series** paste an `atsu.moe/manga/<id>` link, then find sources and link one like any request. Download links open `atsu.moe/upload?manga=<id>`.
 - **Nothing is ever uploaded for you.** Download turns a chapter into a ZIP; you add it on atsu.moe/upload, submit it yourself, then press **Mark uploaded**.
 
 ## Run

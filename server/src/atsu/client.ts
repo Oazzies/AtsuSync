@@ -79,6 +79,17 @@ export interface AtsuSearchHit {
   isAdult: boolean;
 }
 
+/** A series page on atsu.moe, from the public search index. */
+export interface AtsuSeriesInfo {
+  id: string;
+  title: string;
+  altTitles: string[];
+  synopsis: string;
+  cover: string | null;
+  chapterCount: number;
+  medium: string | null;
+}
+
 export class AtsuError extends Error {
   constructor(message: string, readonly status?: number) {
     super(message);
@@ -174,6 +185,24 @@ export class AtsuClient {
       medium: d.medium ?? null,
       isAdult: !!d.isAdult,
     }));
+  }
+
+  /** One series from the public search index by its Atsumaru id (no login needed), or null when it doesn't exist. */
+  async getSeriesInfo(mangaId: string): Promise<AtsuSeriesInfo | null> {
+    const params = new URLSearchParams({ q: '*', query_by: 'title', filter_by: `id:=${mangaId}`, limit: '1' });
+    const r = await this.json<{ hits?: { document: Record<string, any> }[] }>(`/collections/manga/documents/search?${params}`);
+    const d = r.hits?.[0]?.document;
+    if (!d) return null;
+    const poster = d.posterMedium ?? d.poster;
+    return {
+      id: String(d.id),
+      title: String(d.title ?? d.englishTitle ?? ''),
+      altTitles: Array.isArray(d.otherNames) ? d.otherNames : [],
+      synopsis: typeof d.synopsis === 'string' ? d.synopsis : '',
+      cover: typeof poster === 'string' ? (poster.startsWith('http') ? poster : `${ATSU_BASE}${poster}`) : null,
+      chapterCount: Number(d.chapterCount ?? 0),
+      medium: d.medium ?? null,
+    };
   }
 
   async listTags(forumId = CONTENT_REQUESTS_FORUM_ID) {

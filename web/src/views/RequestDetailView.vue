@@ -36,13 +36,15 @@ const kindFilter = ref<'all' | SourceKind>('all');
 const req = computed(() => data.value?.request);
 const matches = computed(() => (data.value?.matches ?? []).filter((m) => kindFilter.value === 'all' || m.sourceKind === kindFilter.value));
 const linkedUrls = computed(() => new Set((data.value?.links ?? []).map((l) => l.seriesUrl)));
-const altTitles = computed(() => (data.value?.mangabaka?.titles ?? []).filter((t) => t !== req.value?.title));
+const altTitles = computed(() => [...(data.value?.mangabaka?.titles ?? []), ...(req.value?.altTitles ?? [])].filter((t) => t !== req.value?.title).slice(0, 12));
+const cover = computed(() => data.value?.mangabaka?.cover ?? req.value?.cover ?? null);
+const existing = computed(() => !!req.value?.atsuMangaId);
 
 async function load() {
   await run();
   presence.value = req.value?.presence ?? null;
   void api.requestAtsu(props.id).then((a) => (atsu.value = a)).catch(() => null);
-  void api.comments(props.id).then((c) => (comments.value = c)).catch(() => (comments.value = []));
+  if (!existing.value) void api.comments(props.id).then((c) => (comments.value = c)).catch(() => (comments.value = []));
 }
 
 async function recheck() {
@@ -112,24 +114,25 @@ onMounted(load);
       <!-- Post -->
       <Card>
         <CardContent class="flex gap-5">
-          <img v-if="data?.mangabaka?.cover" :src="data.mangabaka.cover" class="hidden h-40 w-28 shrink-0 rounded-md object-cover sm:block" />
+          <img v-if="cover" :src="cover" class="hidden h-40 w-28 shrink-0 rounded-md object-cover sm:block" referrerpolicy="no-referrer" />
           <div class="min-w-0 flex-1 space-y-3">
             <div class="flex flex-wrap items-center gap-2">
               <h1 class="text-2xl font-semibold tracking-tight">{{ req.title }}</h1>
-              <StatusBadge :status="req.status" />
+              <Badge v-if="existing" variant="secondary">Existing series</Badge>
+              <StatusBadge v-else :status="req.status" />
               <Badge v-for="t in req.tags" :key="t.id" variant="secondary">{{ t.emoji }} {{ t.name }}</Badge>
             </div>
             <p v-if="altTitles.length" class="text-xs text-muted-foreground">Also known as: {{ altTitles.join(' · ') }}</p>
             <Markdown :source="req.content" />
             <div class="flex flex-wrap gap-2 pt-1">
               <Button as="a" :href="req.url" target="_blank" rel="noopener" variant="outline" size="sm">
-                <ExternalLink class="size-4" /> Open post
+                <ExternalLink class="size-4" /> {{ existing ? 'Open on Atsumaru' : 'Open post' }}
               </Button>
               <Button v-for="t in req.trackers" :key="t.url" as="a" :href="t.url" target="_blank" rel="noopener" variant="ghost" size="sm" class="capitalize">
                 {{ t.kind }} <ExternalLink class="size-3" />
               </Button>
             </div>
-            <p class="text-xs text-muted-foreground">Posted {{ fmtAgo(req.createdAt) }}<template v-if="req.authorName"> by {{ req.authorName }}</template></p>
+            <p v-if="!existing" class="text-xs text-muted-foreground">Posted {{ fmtAgo(req.createdAt) }}<template v-if="req.authorName"> by {{ req.authorName }}</template></p>
           </div>
         </CardContent>
       </Card>
@@ -138,8 +141,10 @@ onMounted(load);
         <!-- Atsumaru state -->
         <Card>
           <CardHeader>
-            <CardTitle class="flex items-center gap-2">On Atsumaru <PresenceBadge :presence="presence" /></CardTitle>
-            <CardDescription>Already uploaded by someone, even if the request isn't marked Added yet?</CardDescription>
+            <CardTitle class="flex items-center gap-2">On Atsumaru <PresenceBadge v-if="!existing" :presence="presence" /></CardTitle>
+            <CardDescription>
+              {{ existing ? 'Chapters Atsumaru already has. Link a source below to upload the missing ones.' : "Already uploaded by someone, even if the request isn't marked Added yet?" }}
+            </CardDescription>
           </CardHeader>
           <CardContent class="space-y-3 text-sm">
             <Skeleton v-if="!atsu" class="h-5 w-2/3" />
@@ -163,7 +168,7 @@ onMounted(load);
               <span v-if="presence.match.via === 'comment'" class="text-muted-foreground"> · linked in a comment</span>
               <span v-else class="text-muted-foreground"> · {{ presence.match.chapterCount }} ch · {{ Math.round(presence.match.score * 100) }}% title match</span>
             </div>
-            <div class="flex items-center gap-2 text-xs text-muted-foreground">
+            <div v-if="!existing" class="flex items-center gap-2 text-xs text-muted-foreground">
               <span>Checked {{ fmtAgo(presence?.checkedAt ?? null) }}</span>
               <Button variant="ghost" size="sm" :disabled="checking" @click="recheck">
                 <RefreshCw class="size-3.5" :class="{ 'animate-spin': checking }" /> Check now
@@ -173,7 +178,7 @@ onMounted(load);
         </Card>
 
         <!-- Comments -->
-        <Card>
+        <Card v-if="!existing">
           <CardHeader>
             <CardTitle class="flex items-center gap-2"><MessageSquare class="size-4" /> Comments</CardTitle>
             <CardDescription>Highlighted comments mention adding or uploading.</CardDescription>

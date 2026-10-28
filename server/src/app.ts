@@ -85,9 +85,18 @@ export function buildApp(opts: AppOptions) {
   };
   app.get('/api/requests', async () => requests.list());
   app.post<{ Querystring: { full?: string } }>('/api/requests/sync', async (req) => runSync(req.query.full === '1'));
+  // Series that already exist on Atsumaru (https://atsu.moe/manga/<id>) can be tracked and extended without a content request.
+  app.post<{ Body: { url: string } }>('/api/series', async (req) => {
+    const input = (req.body?.url ?? '').trim();
+    const mangaId = input.match(/atsu\.moe\/manga\/([A-Za-z0-9_-]+)/i)?.[1] ?? (/^[A-Za-z0-9_-]+$/.test(input) ? input : null);
+    if (!mangaId) throw Object.assign(new Error('Paste an atsu.moe/manga/… link'), { statusCode: 400 });
+    const info = await atsu.getSeriesInfo(mangaId);
+    if (!info) throw Object.assign(new Error('That series was not found on Atsumaru'), { statusCode: 404 });
+    return requests.upsertAtsuSeries(info);
+  });
   app.get<{ Params: { id: string } }>('/api/requests/:id', async (req) => {
     // Refresh this one post so status tags are current when looking at it.
-    const post = await atsu.getPost(req.params.id).catch(() => null);
+    const post = req.params.id.startsWith('atsu:') ? null : await atsu.getPost(req.params.id).catch(() => null);
     if (post?.id && post.createdAt) requests.upsertPost(post);
     const r = mustRequest(req.params.id);
     const mangabaka = r.mangabakaId ? await getMangaBakaSeries(r.mangabakaId).catch(() => null) : null;
@@ -99,12 +108,17 @@ export function buildApp(opts: AppOptions) {
     if (!sectionId) return [];
     return (await atsu.getComments(sectionId)).map(toRequestComment);
   });
-  app.post<{ Params: { id: string } }>('/api/requests/:id/presence', async (req) => presence.check(mustRequest(req.params.id)));
+  app.post<{ Params: { id: string } }>('/api/requests/:id/presence', async (req) => {
+    const r = mustRequest(req.params.id);
+    if (r.atsuMangaId) throw Object.assign(new Error('This series is already on Atsumaru'), { statusCode: 400 });
+    return presence.check(r);
+  });
   app.get<{ Params: { id: string } }>('/api/requests/:id/atsu', async (req) => {
     const r = mustRequest(req.params.id);
     const linked = links.list({ requestId: r.id }).find((l) => l.atsuMangaId);
-    if (!linked && !r.mangabakaId) return { ...emptySeriesState(), error: 'No MangaBaka link on this request' };
-    return atsu.getSeriesState(linked ? { mangaId: linked.atsuMangaId } : { mangaBakaId: r.mangabakaId });
+    const mangaId = linked?.atsuMangaId ?? r.atsuMangaId;
+    if (!mangaId && !r.mangabakaId) return { ...emptySeriesState(), error: 'No MangaBaka link on this request' };
+    return atsu.getSeriesState(mangaId ? { mangaId } : { mangaBakaId: r.mangabakaId });
   });
   app.post<{ Params: { id: string } }>('/api/requests/:id/find-sources', async (req) => discovery.find(mustRequest(req.params.id)));
   app.post<{ Params: { id: string }; Body: { url: string } }>('/api/requests/:id/add-source', async (req) =>
@@ -129,8 +143,8 @@ export function buildApp(opts: AppOptions) {
   app.get('/api/links', async () => links.list());
   app.post<{ Body: { requestId: string; sourceId: string; seriesUrl: string } }>('/api/links', async (req) => {
     const r = mustRequest(req.body.requestId);
-    const atsuState = r.mangabakaId ? await atsu.getSeriesState({ mangaBakaId: r.mangabakaId }).catch(() => null) : null;
-    return links.create({ ...req.body, atsuMangaId: atsuState?.mangaId ?? null, checkIntervalMin: settings.get().defaultCheckIntervalMin });
+    const atsuState = !r.atsuMangaId && r.mangabakaId ? await atsu.getSeriesState({ mangaBakaId: r.mangabakaId }).catch(() => null) : null;
+    return links.create({ ...req.body, atsuMangaId: r.atsuMangaId ?? atsuState?.mangaId ?? null, checkIntervalMin: settings.get().defaultCheckIntervalMin });
   });
   app.get<{ Params: { id: string } }>('/api/links/:id', async (req) => {
     const link = links.get(Number(req.params.id));

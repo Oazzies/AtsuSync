@@ -27,7 +27,9 @@ const q = ref('');
 const type = ref('all');
 const kind = ref('all');
 const showAll = ref(false);
-const view = ref<'all' | 'done' | 'linked'>('all');
+const view = ref<'all' | 'done' | 'linked' | 'series'>('all');
+const seriesUrl = ref('');
+const adding = ref(false);
 
 const TYPES = ['Manhwa', 'Manga', 'Manhua', 'Comic', 'Novel'];
 const CLOSED = new Set(['added', 'cant_add', 'duplicate']);
@@ -40,6 +42,7 @@ const filtered = computed(() => {
   return (data.value ?? []).filter((r) => {
     if (view.value === 'done' && !looksDone(r)) return false;
     if (view.value === 'linked' && !r.linkCount) return false;
+    if (view.value === 'series' ? !r.atsuMangaId : !!r.atsuMangaId && view.value !== 'linked') return false;
     // The default lists only posts that still have Atsumaru's "Upload this" button.
     if (view.value === 'all' && !showAll.value && !r.uploadable) return false;
     if (type.value !== 'all' && !r.tags.some((t) => t.name === type.value)) return false;
@@ -59,6 +62,20 @@ async function sync(full: boolean) {
     toast.error((e as Error).message);
   } finally {
     syncing.value = false;
+  }
+}
+
+async function addSeries() {
+  if (!seriesUrl.value.trim()) return;
+  adding.value = true;
+  try {
+    const r = await api.addSeries(seriesUrl.value.trim());
+    seriesUrl.value = '';
+    await router.push(`/requests/${encodeURIComponent(r.id)}`);
+  } catch (e) {
+    toast.error((e as Error).message);
+  } finally {
+    adding.value = false;
   }
 }
 
@@ -89,6 +106,7 @@ onMounted(run);
             Probably done <Badge v-if="doneCount" class="ml-1.5 h-5 px-1.5">{{ doneCount }}</Badge>
           </TabsTrigger>
           <TabsTrigger value="linked">Linked</TabsTrigger>
+          <TabsTrigger value="series">Existing series</TabsTrigger>
         </TabsList>
       </Tabs>
       <div class="relative min-w-56 flex-1">
@@ -113,6 +131,16 @@ onMounted(run);
       <div v-if="view === 'all'" class="flex items-center gap-2">
         <Switch id="all" v-model="showAll" />
         <Label for="all" class="text-sm font-normal text-muted-foreground">Include posts without an upload button</Label>
+      </div>
+    </div>
+
+    <div v-if="view === 'series'" class="space-y-2">
+      <p class="text-sm text-muted-foreground">
+        Series that are already on Atsumaru, with no content request. Paste its atsu.moe/manga/… link, link a source, and upload the missing chapters.
+      </p>
+      <div class="flex max-w-xl gap-2">
+        <Input v-model="seriesUrl" placeholder="https://atsu.moe/manga/YwMX0" @keyup.enter="addSeries" />
+        <Button :disabled="adding || !seriesUrl.trim()" @click="addSeries">{{ adding ? 'Adding…' : 'Add series' }}</Button>
       </div>
     </div>
 
@@ -145,16 +173,17 @@ onMounted(run);
             v-for="r in filtered"
             :key="r.id"
             class="cursor-pointer"
-            @click="router.push(`/requests/${r.id}`)"
+            @click="router.push(`/requests/${encodeURIComponent(r.id)}`)"
           >
             <TableCell class="max-w-md">
               <div class="truncate font-medium">{{ r.title }}</div>
               <div class="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <span v-if="r.kind">{{ r.kind === 'new_source' ? 'New source' : 'New series' }} ·</span>
+                <span v-if="r.atsuMangaId">On Atsumaru ·</span>
+                <span v-else-if="r.kind">{{ r.kind === 'new_source' ? 'New source' : 'New series' }} ·</span>
                 <span v-if="r.authorName">{{ r.authorName }} ·</span>
                 <MessageSquare class="size-3" /> {{ r.commentCount }}
                 <Badge v-if="r.linkCount" variant="secondary" class="ml-1 h-4 px-1 text-[10px]">linked</Badge>
-                <Badge v-if="!r.uploadable" variant="outline" class="ml-1 h-4 px-1 text-[10px]" title="Atsumaru shows no Upload button on this post">no upload button</Badge>
+                <Badge v-if="!r.uploadable && !r.atsuMangaId" variant="outline" class="ml-1 h-4 px-1 text-[10px]" title="Atsumaru shows no Upload button on this post">no upload button</Badge>
               </div>
             </TableCell>
             <TableCell>
