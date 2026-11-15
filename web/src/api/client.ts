@@ -7,6 +7,7 @@ import type {
   DownloadJob,
   Link,
   LinkChapter,
+  MangaBaka,
   ServerEvent,
   Settings,
   SettingsView,
@@ -15,14 +16,6 @@ import type {
   SourceChapter,
   SourceSeriesHit,
 } from '@atsusync/shared';
-
-export interface MangaBaka {
-  id: number;
-  title: string;
-  titles: string[];
-  cover: string | null;
-  type: string | null;
-}
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -48,6 +41,7 @@ export const api = {
   comments: (id: string) => call<RequestComment[]>('GET', `/requests/${id}/comments`),
   checkPresence: (id: string) => call<AtsuPresence>('POST', `/requests/${id}/presence`),
   findSources: (id: string) => call<SourceMatch[]>('POST', `/requests/${id}/find-sources`),
+  checkMangaBaka: (id: string) => call<{ mangabaka: MangaBaka | null; mediumMismatch: boolean }>('POST', `/requests/${id}/mangabaka`),
   addSource: (id: string, url: string) => call<SourceMatch>('POST', `/requests/${id}/add-source`, { url }),
 
   sources: () => call<SourceInfo[]>('GET', '/sources'),
@@ -56,7 +50,7 @@ export const api = {
 
   links: () => call<Link[]>('GET', '/links'),
   createLink: (requestId: string, sourceId: string, seriesUrl: string) => call<Link>('POST', '/links', { requestId, sourceId, seriesUrl }),
-  link: (id: number) => call<{ link: Link; atsu: AtsuSeriesState | null; chapters: LinkChapter[] }>('GET', `/links/${id}`),
+  link: (id: number) => call<{ link: Link; atsu: AtsuSeriesState | null; mangabaka: MangaBaka | null; chapters: LinkChapter[] }>('GET', `/links/${id}`),
   updateLink: (id: number, patch: { watch?: boolean; checkIntervalMin?: number; atsuMangaId?: string | null }) =>
     call<Link>('PATCH', `/links/${id}`, patch),
   deleteLink: (id: number) => call<{ ok: true }>('DELETE', `/links/${id}`),
@@ -70,10 +64,17 @@ export const api = {
       'GET',
       `/links/${id}/other-series?url=${encodeURIComponent(url)}`,
     ),
-  fetchFrom: (id: number, url: string, numbers: number[]) => call<DownloadJob[]>('POST', `/links/${id}/fetch-from`, { url, numbers }),
+  fetchFrom: (id: number, url: string, numbers: number[], urls?: Record<number, string>) =>
+    call<DownloadJob[]>('POST', `/links/${id}/fetch-from`, { url, numbers, urls }),
   checkLink: (id: number) => call<{ added: number; link: Link }>('POST', `/links/${id}/check`),
+  refreshAtsuLinks: (linkIds?: number[]) => call<{ updated: number; links: Link[] }>('POST', '/links/refresh-atsu', { linkIds }),
+  checkAllLinks: (linkIds?: number[]) => call<{ checked: number; added: number }>('POST', '/links/check-all', { linkIds }),
+  bulkLinks: (ids: number[], action: 'watch' | 'pause' | 'untrack' | 'check') =>
+    call<{ ok: true; count: number }>('POST', '/links/bulk', { ids, action }),
   setChapterState: (chapterIds: number[], state: 'skipped' | 'known' | 'pending' | 'uploaded') =>
     call<{ ok: true }>('POST', '/chapters/state', { chapterIds, state }),
+  setChapterSource: (chapterId: number, url: string) =>
+    call<LinkChapter>('POST', `/chapters/${chapterId}/source`, { url }),
 
   downloads: (linkId?: number) => call<DownloadJob[]>('GET', linkId === undefined ? '/downloads' : `/downloads?linkId=${linkId}`),
   download: (chapterIds: number[]) => call<DownloadJob[]>('POST', '/downloads', { chapterIds }),

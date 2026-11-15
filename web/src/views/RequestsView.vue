@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { toast } from 'vue-sonner';
-import { ExternalLink, MessageSquare, RefreshCw, Search } from 'lucide-vue-next';
+import { ExternalLink, MessageSquare, RefreshCw, Search } from '@/icons';
 import type { ContentRequest } from '@atsusync/shared';
 import { api, fmtAgo, useAsync, useServerEvents } from '@/api/client';
 import PageHeader from '@/components/PageHeader.vue';
@@ -18,6 +18,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { typeTone } from '@/lib/tone';
 
 const router = useRouter();
 const { data, error, loading, run } = useAsync(api.requests);
@@ -103,7 +104,7 @@ onMounted(run);
         <TabsList>
           <TabsTrigger value="all">Requests</TabsTrigger>
           <TabsTrigger value="done">
-            Probably done <Badge v-if="doneCount" class="ml-1.5 h-5 px-1.5">{{ doneCount }}</Badge>
+            Probably done <Badge v-if="doneCount" class="ml-2">{{ doneCount }}</Badge>
           </TabsTrigger>
           <TabsTrigger value="linked">Linked</TabsTrigger>
           <TabsTrigger value="series">Existing series</TabsTrigger>
@@ -182,12 +183,12 @@ onMounted(run);
                 <span v-else-if="r.kind">{{ r.kind === 'new_source' ? 'New source' : 'New series' }} ·</span>
                 <span v-if="r.authorName">{{ r.authorName }} ·</span>
                 <MessageSquare class="size-3" /> {{ r.commentCount }}
-                <Badge v-if="r.linkCount" variant="secondary" class="ml-1 h-4 px-1 text-[10px]">linked</Badge>
-                <Badge v-if="!r.uploadable && !r.atsuMangaId" variant="outline" class="ml-1 h-4 px-1 text-[10px]" title="Atsumaru shows no Upload button on this post">no upload button</Badge>
+                <Badge v-if="r.linkCount" variant="secondary" class="ml-1">linked</Badge>
+                <Badge v-if="!r.uploadable && !r.atsuMangaId" variant="outline" class="ml-1" title="Atsumaru shows no Upload button on this post">no upload button</Badge>
               </div>
             </TableCell>
             <TableCell>
-              <Badge v-for="t in typeTags(r)" :key="t.id" variant="secondary">{{ t.emoji }} {{ t.name }}</Badge>
+              <Badge v-for="t in typeTags(r)" :key="t.id" :class="typeTone(t.name)">{{ t.name }}</Badge>
             </TableCell>
             <TableCell>
               <div class="flex flex-wrap gap-1">

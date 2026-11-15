@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
-import { ExternalLink, Stethoscope } from 'lucide-vue-next';
+import { ExternalLink, Stethoscope } from '@/icons';
 import type { SourceInfo, SourceKind } from '@atsusync/shared';
 import { api } from '@/api/client';
 import PageHeader from '@/components/PageHeader.vue';
@@ -70,7 +70,10 @@ onMounted(load);
         <div v-for="s in byKind[g.kind]" :key="s.id" class="flex flex-wrap items-center gap-3 rounded-md border p-3">
           <Switch :model-value="s.enabled" @update:model-value="(v) => toggle(s, !!v)" />
           <div class="min-w-0 flex-1">
-            <div class="font-medium">{{ s.name }}</div>
+            <div class="flex items-center gap-2 font-medium">
+              {{ s.name }}
+              <span v-if="s.medium === 'novel'" class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-normal uppercase tracking-wide text-muted-foreground" title="Novel source: chapters download as EPUB">Novel</span>
+            </div>
             <a :href="s.baseUrl" target="_blank" rel="noopener" class="inline-flex items-center gap-1 text-xs text-muted-foreground hover:underline">
               {{ s.baseUrl }} <ExternalLink class="size-3" />
             </a>

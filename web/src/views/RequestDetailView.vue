@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { toast } from 'vue-sonner';
-import { ArrowLeft, ExternalLink, Link2, Loader2, MessageSquare, RefreshCw, Search } from 'lucide-vue-next';
+import { ArrowLeft, ExternalLink, Link2, Loader2, MessageSquare, RefreshCw, Search } from '@/icons';
 import type { AtsuPresence, AtsuSeriesState, RequestComment, SourceKind, SourceMatch } from '@atsusync/shared';
 import { api, fmtAgo, fmtRanges, useAsync } from '@/api/client';
 import KindBadge from '@/components/KindBadge.vue';
@@ -16,7 +16,7 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { tone } from '@/lib/tone';
+import { tone, typeTone } from '@/lib/tone';
 
 const props = defineProps<{ id: string }>();
 const emit = defineEmits<{ changed: [] }>();
@@ -27,6 +27,8 @@ const atsu = ref<AtsuSeriesState | null>(null);
 const comments = ref<RequestComment[] | null>(null);
 const presence = ref<AtsuPresence | null>(null);
 const checking = ref(false);
+const checkingMb = ref(false);
+const mbMismatch = ref(false);
 const finding = ref(false);
 const searched = ref(false);
 const pasteUrl = ref('');
@@ -55,6 +57,21 @@ async function recheck() {
     toast.error((e as Error).message);
   } finally {
     checking.value = false;
+  }
+}
+
+async function checkMangaBaka() {
+  checkingMb.value = true;
+  try {
+    const res = await api.checkMangaBaka(props.id);
+    if (data.value) data.value.mangabaka = res.mangabaka;
+    mbMismatch.value = res.mediumMismatch;
+    if (!res.mangabaka) toast.info('No matching MangaBaka entry found for this medium');
+    else toast.success(`MangaBaka: ${res.mangabaka.totalChapters ?? '?'} chapters (${res.mangabaka.type ?? 'unknown'})`);
+  } catch (e) {
+    toast.error((e as Error).message);
+  } finally {
+    checkingMb.value = false;
   }
 }
 
@@ -117,10 +134,10 @@ onMounted(load);
           <img v-if="cover" :src="cover" class="hidden h-40 w-28 shrink-0 rounded-md object-cover sm:block" referrerpolicy="no-referrer" />
           <div class="min-w-0 flex-1 space-y-3">
             <div class="flex flex-wrap items-center gap-2">
-              <h1 class="text-2xl font-semibold tracking-tight">{{ req.title }}</h1>
+              <h1 class="text-2xl font-bold text-foreground2">{{ req.title }}</h1>
               <Badge v-if="existing" variant="secondary">Existing series</Badge>
               <StatusBadge v-else :status="req.status" />
-              <Badge v-for="t in req.tags" :key="t.id" variant="secondary">{{ t.emoji }} {{ t.name }}</Badge>
+              <Badge v-for="t in req.tags" :key="t.id" :class="typeTone(t.name)">{{ t.name }}</Badge>
             </div>
             <p v-if="altTitles.length" class="text-xs text-muted-foreground">Also known as: {{ altTitles.join(' · ') }}</p>
             <Markdown :source="req.content" />
@@ -168,11 +185,28 @@ onMounted(load);
               <span v-if="presence.match.via === 'comment'" class="text-muted-foreground"> · linked in a comment</span>
               <span v-else class="text-muted-foreground"> · {{ presence.match.chapterCount }} ch · {{ Math.round(presence.match.score * 100) }}% title match</span>
             </div>
-            <div v-if="!existing" class="flex items-center gap-2 text-xs text-muted-foreground">
-              <span>Checked {{ fmtAgo(presence?.checkedAt ?? null) }}</span>
-              <Button variant="ghost" size="sm" :disabled="checking" @click="recheck">
+            <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span v-if="!existing">Checked {{ fmtAgo(presence?.checkedAt ?? null) }}</span>
+              <Button v-if="!existing" variant="ghost" size="sm" :disabled="checking" @click="recheck">
                 <RefreshCw class="size-3.5" :class="{ 'animate-spin': checking }" /> Check now
               </Button>
+              <Button variant="ghost" size="sm" :disabled="checkingMb" @click="checkMangaBaka">
+                <RefreshCw class="size-3.5" :class="{ 'animate-spin': checkingMb }" />
+                {{ data?.mangabaka ? 'Refresh MangaBaka' : 'Check MangaBaka' }}
+              </Button>
+            </div>
+            <div v-if="data?.mangabaka" class="rounded-md border p-3 text-xs space-y-1">
+              <div class="flex items-center justify-between gap-2">
+                <span class="font-medium text-foreground">
+                  MangaBaka: {{ data.mangabaka.totalChapters ?? '?' }} chapters
+                  <span v-if="data.mangabaka.status" class="text-muted-foreground">· {{ data.mangabaka.status }}</span>
+                  <span v-if="data.mangabaka.type" class="text-muted-foreground">· {{ data.mangabaka.type }}</span>
+                </span>
+                <a v-if="data.mangabaka.url" :href="data.mangabaka.url" target="_blank" rel="noopener" class="inline-flex items-center gap-1 hover:underline">
+                  Open <ExternalLink class="size-3" />
+                </a>
+              </div>
+              <div v-if="mbMismatch" class="text-destructive">Warning: MangaBaka entry type ({{ data.mangabaka.type }}) does not match comic/novel medium.</div>
             </div>
           </CardContent>
         </Card>
@@ -194,7 +228,7 @@ onMounted(load);
             >
               <div class="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
                 <span class="font-medium text-foreground">{{ c.user }}</span> · {{ fmtAgo(c.createdAt) }}
-                <Badge v-if="c.claim" variant="outline" :class="tone('warning')" class="h-4 px-1 text-[10px]">upload claim</Badge>
+                <Badge v-if="c.claim" variant="outline" :class="tone('warning')">upload claim</Badge>
               </div>
               <Markdown :source="c.content" />
             </div>

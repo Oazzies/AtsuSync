@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { toast } from 'vue-sonner';
-import { ArrowLeft, CheckCheck, ChevronDown, ChevronRight, Download, DownloadCloud, ExternalLink, Lock, Plus, RefreshCw, RotateCcw, SkipForward, Trash2, X } from 'lucide-vue-next';
+import { ArrowLeft, CheckCheck, ChevronDown, ChevronRight, Download, DownloadCloud, ExternalLink, Lock, Plus, RefreshCw, RotateCcw, SkipForward, Trash2, X } from '@/icons';
 import type { DownloadJob, LinkChapter } from '@atsusync/shared';
 import { api, fmtAgo, fmtRanges, useAsync, useServerEvents } from '@/api/client';
 import KindBadge from '@/components/KindBadge.vue';
@@ -30,6 +30,7 @@ const { data, error, loading, run } = useAsync(() => api.link(props.id));
 const selected = ref(new Set<number>());
 const busy = ref(false);
 const filter = ref<'missing' | 'all'>('missing');
+const groupFilter = ref<string>('all');
 const jobs = ref<DownloadJob[]>([]);
 const openLogs = ref(new Set<number>());
 const building = ref(false);
@@ -56,9 +57,17 @@ const INTERVALS = [15, 30, 60, 120, 360, 720, 1440];
 const fmtInterval = (m: number) => (m < 60 ? `${m} min` : `${m / 60} h`);
 
 const link = computed(() => data.value?.link);
+const groups = computed(() => {
+  const counts = new Map<string, number>();
+  for (const c of data.value?.chapters ?? []) {
+    if (c.group) counts.set(c.group, (counts.get(c.group) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+});
 const chapters = computed(() => {
   const all = [...(data.value?.chapters ?? [])].reverse();
-  return filter.value === 'missing' ? all.filter((c) => !c.onAtsu && c.state !== 'uploaded' && c.state !== 'skipped') : all;
+  const byState = filter.value === 'missing' ? all.filter((c) => !c.onAtsu && c.state !== 'uploaded' && c.state !== 'skipped') : all;
+  return groupFilter.value === 'all' ? byState : byState.filter((c) => c.group === groupFilter.value);
 });
 const downloadable = (c: LinkChapter) => !c.locked && !c.url.startsWith('manual:') && !c.onAtsu && c.state !== 'queued' && c.state !== 'uploaded';
 // Everything on this page that can still be fetched, whatever the current filter or selection.
@@ -92,6 +101,12 @@ async function act(fn: () => Promise<unknown>) {
   }
 }
 
+const switchChapterSource = (chapterId: number, url: string) =>
+  act(async () => {
+    await api.setChapterSource(chapterId, url);
+    toast.success('Switched chapter source');
+  });
+
 const download = () =>
   act(async () => {
     const created = await api.download([...selected.value]);
@@ -104,7 +119,7 @@ const downloadAll = () =>
     toast.success(`Downloading ${created.length} chapter(s)`);
     await loadJobs();
   });
-/** Trigger a browser download for every finished ZIP, one after another. */
+/** Trigger a browser download for every finished file (ZIP, or EPUB for novels), one after another. */
 async function saveAllReady() {
   for (const j of readyJobs.value) {
     const a = document.createElement('a');
@@ -118,7 +133,7 @@ async function saveAllReady() {
 }
 const clearDownloads = () => {
   const n = jobs.value.filter((j) => !activeJob(j)).length;
-  if (!confirm(`Delete ${n} finished download(s) and their ZIP files? Chapters marked uploaded stay uploaded.`)) return;
+  if (!confirm(`Delete ${n} finished download(s) and their files? Chapters marked uploaded stay uploaded.`)) return;
   return act(async () => {
     const r = await api.clearDownloads(props.id);
     toast.success(`Cleared ${r.jobs} download(s), deleted ${r.files} file(s)`);
@@ -199,7 +214,7 @@ onMounted(() => {
       <div class="flex flex-wrap items-start gap-4">
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2">
-            <h1 class="text-2xl font-semibold tracking-tight">{{ link.seriesTitle }}</h1>
+            <h1 class="text-2xl font-bold text-foreground2">{{ link.seriesTitle }}</h1>
             <KindBadge :kind="link.sourceKind" />
           </div>
           <p class="text-sm text-muted-foreground">
@@ -256,6 +271,13 @@ onMounted(() => {
               <TabsTrigger value="all">All chapters</TabsTrigger>
             </TabsList>
           </Tabs>
+          <Select v-if="groups.length > 1" v-model="groupFilter">
+            <SelectTrigger class="h-8 w-52"><SelectValue placeholder="All sources" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All sources ({{ data?.chapters.length ?? 0 }})</SelectItem>
+              <SelectItem v-for="g in groups" :key="g.name" :value="g.name">{{ g.name }} ({{ g.count }})</SelectItem>
+            </SelectContent>
+          </Select>
           <div class="flex-1" />
           <Button variant="outline" size="sm" :disabled="fetching" @click="fetching = true"><DownloadCloud class="size-4" /> From another source</Button>
           <Button variant="outline" size="sm" :disabled="building" @click="building = true"><Plus class="size-4" /> Add chapter</Button>
@@ -288,10 +310,25 @@ onMounted(() => {
                 <Checkbox :model-value="selected.has(c.id)" :disabled="!downloadable(c)" @update:model-value="(v) => toggle(c.id, !!v)" />
               </TableCell>
               <TableCell class="font-medium">
-                {{ c.label }}
-                <Badge v-if="c.locked" variant="outline" :class="tone('warning')" class="ml-1" title="Paid or early access on the source">
-                  <Lock class="size-3" /> Locked
-                </Badge>
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span>{{ c.label }}</span>
+                  <Select
+                    v-if="c.alternatives.length"
+                    :model-value="c.url"
+                    :disabled="busy"
+                    @update:model-value="(v) => v && v !== c.url && switchChapterSource(c.id, String(v))"
+                  >
+                    <SelectTrigger class="h-6 w-auto max-w-52 px-2 text-xs font-normal"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem :value="c.url">{{ c.group ?? 'Default' }}</SelectItem>
+                      <SelectItem v-for="alt in c.alternatives" :key="alt.url" :value="alt.url">{{ alt.group }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Badge v-else-if="c.group" variant="secondary" class="font-normal">{{ c.group }}</Badge>
+                  <Badge v-if="c.locked" variant="outline" :class="tone('warning')" title="Paid or early access on the source">
+                    <Lock class="size-3" /> Locked
+                  </Badge>
+                </div>
               </TableCell>
               <TableCell><StatusBadge :status="c.state" /></TableCell>
               <TableCell>
@@ -321,7 +358,7 @@ onMounted(() => {
             <Trash2 class="size-4" /> Clear finished
           </Button>
           <Button v-if="readyJobs.length > 1" size="sm" @click="saveAllReady">
-            <Download class="size-4" /> Save all ZIPs ({{ readyJobs.length }})
+            <Download class="size-4" /> Save all files ({{ readyJobs.length }})
           </Button>
         </div>
         <div class="divide-y">
@@ -346,7 +383,7 @@ onMounted(() => {
                 <Button variant="outline" size="sm" title="After you submitted it on atsu.moe" @click="markJobUploaded(j)">
                   <CheckCheck class="size-4" /> Mark uploaded
                 </Button>
-                <Button as="a" :href="api.downloadFileUrl(j.id)" download size="sm"><Download class="size-4" /> ZIP</Button>
+                <Button as="a" :href="api.downloadFileUrl(j.id)" download size="sm"><Download class="size-4" /> Download</Button>
               </template>
             </div>
             <div v-if="activeJob(j) && j.total" class="flex items-center gap-3">

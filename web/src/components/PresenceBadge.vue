@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AtsuPresence } from '@atsusync/shared';
-import { CircleCheck, MessageSquareText, Search } from 'lucide-vue-next';
+import { CircleCheck, MessageSquareText, Search } from '@/icons';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { tone } from '@/lib/tone';

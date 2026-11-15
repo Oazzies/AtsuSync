@@ -1,13 +1,24 @@
 export type Tone = 'primary' | 'success' | 'warning' | 'danger' | 'info' | 'neutral';
 
+// Solid, white-text tag colors, taken from atsu.moe's type/rating chips.
 const TONES: Record<Tone, string> = {
-  primary: 'border-primary/40 bg-primary/10 text-primary',
-  success: 'border-success/40 bg-success/10 text-success',
-  warning: 'border-warning/40 bg-warning/10 text-warning',
-  danger: 'border-destructive/40 bg-destructive/10 text-destructive',
-  info: 'border-info/40 bg-info/10 text-info',
-  neutral: 'text-muted-foreground',
+  primary: 'bg-[#6f5fc4] text-white',
+  success: 'bg-[#209928] text-white',
+  warning: 'bg-[#805e03] text-white',
+  danger: 'bg-[#9f0712] text-white',
+  info: 'bg-[#038cfc] text-white',
+  neutral: 'bg-[#47484a] text-foreground2',
 };
 
-/** Classes for a soft, colored outline badge. */
+/** Classes for an atsu.moe style solid tag. */
 export const tone = (t: Tone) => TONES[t];
+
+// Content-type chip colors, as shown on atsu.moe's cover cards.
+const TYPE_TONES: Record<string, string> = {
+  manhwa: 'bg-[#038cfc] text-white',
+  manga: 'bg-[#7d5fd6] text-white',
+  manhua: 'bg-[#d6541f] text-white',
+  comic: 'bg-[#c0267a] text-white',
+  novel: 'bg-[#0f8f7a] text-white',
+};
+export const typeTone = (name: string) => TYPE_TONES[name.toLowerCase()] ?? TONES.neutral;

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { toast } from 'vue-sonner';
-import { ArrowDown, ArrowUp, Link2, Loader2, Package, Trash2, Upload, X } from 'lucide-vue-next';
+import { ArrowDown, ArrowUp, Link2, Loader2, Package, Trash2, Upload, X } from '@/icons';
 import { api, type DraftPreviewPage, type DraftView } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';

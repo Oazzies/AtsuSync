@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { toast } from 'vue-sonner';
-import { Download, Loader2, Search, X } from 'lucide-vue-next';
+import { Download, Loader2, Search, X } from '@/icons';
 import type { SourceSeriesHit } from '@atsusync/shared';
 import { api } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 const props = defineProps<{ linkId: number; seriesTitle: string }>();
 const emit = defineEmits<{ queued: []; close: [] }>();
@@ -22,6 +23,7 @@ const searching = ref(false);
 const loading = ref(false);
 const other = ref<Other | null>(null);
 const selected = ref(new Set<number>());
+const pickedUrls = ref<Record<number, string>>({});
 const numbersText = ref('');
 const busy = ref(false);
 
@@ -43,6 +45,7 @@ async function open(url: string) {
   try {
     other.value = await api.otherSeries(props.linkId, url);
     selected.value = new Set();
+    pickedUrls.value = {};
   } catch (e) {
     toast.error((e as Error).message);
   } finally {
@@ -75,7 +78,7 @@ async function download() {
   if (!other.value || !selected.value.size) return;
   busy.value = true;
   try {
-    const jobs = await api.fetchFrom(props.linkId, other.value.url, [...selected.value]);
+    const jobs = await api.fetchFrom(props.linkId, other.value.url, [...selected.value], pickedUrls.value);
     toast.success(`Downloading ${jobs.length} chapter(s) from ${other.value.sourceName}`);
     emit('queued');
     other.value = null;
@@ -135,6 +138,18 @@ async function download() {
         <label v-for="c in chapters" :key="c.number" class="flex cursor-pointer items-center gap-3 px-3 py-1.5 text-sm">
           <Checkbox :model-value="selected.has(c.number)" :disabled="c.locked" @update:model-value="(v) => toggle(c.number, !!v)" />
           <span>{{ c.label }}</span>
+          <Select
+            v-if="c.alternatives?.length"
+            :model-value="pickedUrls[c.number] ?? c.url"
+            @update:model-value="(v) => v && (pickedUrls[c.number] = String(v))"
+          >
+            <SelectTrigger class="h-6 w-auto max-w-48 px-2 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="c.url">{{ c.group ?? 'Default' }}</SelectItem>
+              <SelectItem v-for="alt in c.alternatives" :key="alt.url" :value="alt.url">{{ alt.group }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Badge v-else-if="c.group" variant="secondary" class="font-normal">{{ c.group }}</Badge>
           <Badge v-if="!c.inLink" variant="outline">not on this link</Badge>
         </label>
       </div>

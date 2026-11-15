@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue';
 import { RouterLink, RouterView } from 'vue-router';
 import { toast } from 'vue-sonner';
-import { Bell, Globe, Inbox, Settings } from 'lucide-vue-next';
+import { Bell, Globe, Inbox, Settings } from '@/icons';
 import { Toaster } from '@/components/ui/sonner';
 import { Badge } from '@/components/ui/badge';
 import { api, connected, useServerEvents } from '@/api/client';
@@ -48,45 +48,53 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="flex min-h-svh">
-    <aside class="sticky top-0 hidden h-svh w-56 shrink-0 flex-col border-r bg-card/40 p-3 md:flex">
-      <div class="mb-6 flex items-center gap-2 px-2 pt-1">
-        <div class="grid size-7 place-items-center rounded-md bg-primary text-sm font-bold text-primary-foreground">A</div>
-        <span class="font-semibold tracking-tight">AtsuSync</span>
-      </div>
-      <nav class="flex flex-col gap-0.5">
-        <RouterLink
-          v-for="n in nav"
-          :key="n.to"
-          :to="n.to"
-          class="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          :exact-active-class="n.to === '/' ? 'bg-accent text-foreground' : ''"
-          :active-class="n.to === '/' ? '' : 'bg-accent text-foreground'"
-        >
-          <component :is="n.icon" class="size-4" />
-          <span class="flex-1">{{ n.label }}</span>
-          <Badge v-if="n.count()" class="h-5 px-1.5">{{ n.count() }}</Badge>
+  <div class="min-h-svh pb-[var(--mobile-bar-h)] md:pb-0" style="--mobile-bar-h: 64px">
+    <!-- Top bar, as on atsu.moe -->
+    <nav class="sticky top-0 z-10 hidden h-(--nav-height) w-full bg-slate md:block">
+      <div class="mx-auto flex h-full w-full max-w-(--wrapper) items-center gap-8 px-(--padding)">
+        <RouterLink to="/" class="rounded-md text-2xl leading-none font-bold tracking-wide text-foreground2 uppercase">
+          Atsu<span class="text-foreground">Sync</span>
         </RouterLink>
-      </nav>
-      <div class="mt-auto space-y-2 px-2 text-xs text-muted-foreground">
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-1">
+          <RouterLink
+            v-for="n in nav"
+            :key="n.to"
+            :to="n.to"
+            class="flex items-center gap-2 rounded-md px-3 py-2 text-foreground transition-colors hover:text-foreground2"
+            :exact-active-class="n.to === '/' ? '!text-foreground2' : ''"
+            :active-class="n.to === '/' ? '' : '!text-foreground2'"
+          >
+            <component :is="n.icon" class="size-4" />
+            <span>{{ n.label }}</span>
+            <Badge v-if="n.count()">{{ n.count() }}</Badge>
+          </RouterLink>
+        </div>
+        <div class="ml-auto flex items-center gap-3 text-sm text-foreground3">
           <span class="size-2 rounded-full" :class="connected ? 'bg-success' : 'bg-destructive'" />
-          {{ user ? `Atsu: ${user}` : 'Atsu: not logged in' }}
+          <span>{{ user ? user : 'Not logged in' }}</span>
         </div>
       </div>
-    </aside>
+    </nav>
 
-    <div class="flex min-w-0 flex-1 flex-col">
-      <!-- Compact top nav on small screens -->
-      <nav class="flex gap-1 overflow-x-auto border-b p-2 md:hidden">
-        <RouterLink v-for="n in nav" :key="n.to" :to="n.to" class="rounded-md px-3 py-1.5 text-sm text-muted-foreground" active-class="bg-accent text-foreground">
-          {{ n.label }}
-        </RouterLink>
-      </nav>
-      <main class="mx-auto w-full max-w-6xl flex-1 p-4 md:p-8">
-        <RouterView @changed="refreshCounts" />
-      </main>
-    </div>
-    <Toaster rich-colors position="bottom-right" />
+    <main class="mx-auto w-full max-w-(--wrapper) px-(--padding) py-6 md:py-8">
+      <RouterView @changed="refreshCounts" />
+    </main>
+
+    <!-- Bottom bar on small screens -->
+    <nav class="fixed inset-x-0 bottom-0 z-10 flex h-(--mobile-bar-h) items-center justify-around border-t border-hair bg-slate md:hidden">
+      <RouterLink
+        v-for="n in nav"
+        :key="n.to"
+        :to="n.to"
+        class="relative flex flex-col items-center gap-1 px-3 py-1 text-[11px] text-foreground3"
+        :exact-active-class="n.to === '/' ? '!text-foreground2' : ''"
+        :active-class="n.to === '/' ? '' : '!text-foreground2'"
+      >
+        <component :is="n.icon" class="size-5" />
+        {{ n.label }}
+        <Badge v-if="n.count()" class="absolute -top-0.5 right-0">{{ n.count() }}</Badge>
+      </RouterLink>
+    </nav>
+    <Toaster position="bottom-right" />
   </div>
 </template>

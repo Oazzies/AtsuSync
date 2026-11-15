@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { toast } from 'vue-sonner';
-import { CircleCheck, CircleAlert } from 'lucide-vue-next';
+import { CircleCheck, CircleAlert } from '@/icons';
 import type { SettingsView } from '@atsusync/shared';
 import { api } from '@/api/client';
 import PageHeader from '@/components/PageHeader.vue';
@@ -79,7 +79,7 @@ onMounted(load);
       <CardHeader>
         <CardTitle>Defaults</CardTitle>
         <CardDescription>
-          Chapters are downloaded as ZIPs; you upload them yourself on atsu.moe. AtsuSync never submits anything for you.
+          Chapters are downloaded as ZIPs (EPUBs for novels); you upload them yourself on atsu.moe. AtsuSync never submits anything for you.
         </CardDescription>
       </CardHeader>
       <CardContent class="space-y-5">
