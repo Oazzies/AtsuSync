@@ -135,7 +135,7 @@ export const api = {
   request: (id: string) =>
     call<{ request: ContentRequest; mangabaka: MangaBaka | null; matches: SourceMatch[]; links: Link[] }>('GET', `/requests/${id}`),
   updateRequestTitle: (id: string, title: string | null) => call<ContentRequest>('PATCH', `/requests/${id}`, { title }),
-  resolveUpload: (params: { sourceId?: string | null; mangaId?: string | null; title?: string | null }) =>
+  resolveUpload: (params: { sourceId?: string | null; mangaId?: string | null; mangaBakaId?: string | null; title?: string | null }) =>
     call<{
       request: ContentRequest | null;
       mangabaka: MangaBaka | null;

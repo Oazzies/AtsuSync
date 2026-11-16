@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import type { ContentRequest, DownloadJob, Link, MangaBaka, SourceMatch } from '@atsusync/shared';
-import { api, fetchDownloadFile, getSidePanelState, START_SERVER_URL, toggleSidePanel, useServerEvents, waitForServerOnline } from '../api';
+import { rankSourceMatches, type ContentRequest, type Link, type MangaBaka, type SourceMatch } from '@atsusync/shared';
+import { api, getSidePanelState, START_SERVER_URL, toggleSidePanel, useServerEvents, waitForServerOnline } from '../api';
 import LinkSection from './LinkSection.vue';
 import Icon from './Icon.vue';
+import { previewPublishedTitleReplace, replaceAllPublishedTitles, type PublishedTitlePreview } from './titleReplace';
 
 type Route =
   | { kind: 'request'; postId: string }
   | { kind: 'manga'; mangaId: string }
-  | { kind: 'upload'; mangaId: string | null; sourceId: string | null }
+  | { kind: 'upload'; mangaId: string | null; sourceId: string | null; mangaBakaId: string | null }
   | { kind: 'other' };
 
 function parseRoute(href: string): Route {
@@ -19,7 +20,12 @@ function parseRoute(href: string): Route {
   const mangaMatch = p.match(/^\/manga\/([^/]+)\/?$/);
   if (mangaMatch?.[1]) return { kind: 'manga', mangaId: mangaMatch[1] };
   if (p === '/upload' || p.startsWith('/upload/')) {
-    return { kind: 'upload', mangaId: u.searchParams.get('manga'), sourceId: u.searchParams.get('source') };
+    return {
+      kind: 'upload',
+      mangaId: u.searchParams.get('manga'),
+      sourceId: u.searchParams.get('source'),
+      mangaBakaId: u.searchParams.get('mb'),
+    };
   }
   return { kind: 'other' };
 }
@@ -243,13 +249,94 @@ function markBrokenCover(url: string) {
   brokenCovers.value = next;
 }
 
-// Upload state
-const allJobs = ref<DownloadJob[]>([]);
-const readyJobs = computed(() => allJobs.value.filter((j) => j.state === 'done'));
-const activeJobs = computed(() => allJobs.value.filter((j) => j.state === 'queued' || j.state === 'downloading'));
-const showAllUploads = ref(false);
-const autoUpload = ref(false);
-let attachingAuto = false;
+// Possible sources filtering & sorting
+const sourceMatchFilter = ref('');
+const sourceMatchSort = ref<'best' | 'chapters' | 'name'>('best');
+const hideSourceErrors = ref(false);
+
+const hasSourceErrors = computed(() => matches.value.some((m) => !!m.error));
+
+const filteredMatches = computed(() => {
+  const q = sourceMatchFilter.value.trim().toLowerCase();
+  let list = matches.value.filter((m) => {
+    if (hideSourceErrors.value && m.error) return false;
+    if (!q) return true;
+    return m.title.toLowerCase().includes(q) || m.sourceName.toLowerCase().includes(q);
+  });
+  const expected = mangabaka.value?.totalChapters ?? null;
+  if (sourceMatchSort.value === 'best') {
+    list = rankSourceMatches(list, expected);
+  } else if (sourceMatchSort.value === 'chapters') {
+    list = [...list].sort((a, b) => {
+      const aErr = a.error ? 1 : 0;
+      const bErr = b.error ? 1 : 0;
+      if (aErr !== bErr) return aErr - bErr;
+      const chDiff = (b.chapterCount ?? -1) - (a.chapterCount ?? -1);
+      if (chDiff !== 0) return chDiff;
+      return b.score - a.score;
+    });
+  } else {
+    list = [...list].sort((a, b) => {
+      const aErr = a.error ? 1 : 0;
+      const bErr = b.error ? 1 : 0;
+      if (aErr !== bErr) return aErr - bErr;
+      if (b.score !== a.score) return b.score - a.score;
+      return (b.chapterCount ?? -1) - (a.chapterCount ?? -1);
+    });
+  }
+  return list;
+});
+
+// Published title mass replace state
+const showTitleReplace = ref(false);
+const findTitleText = ref('');
+const replaceTitleText = ref('');
+const replaceMatchCase = ref(false);
+const replaceUseRegex = ref(false);
+const titlePreview = ref<PublishedTitlePreview | null>(null);
+const replaceRegexError = ref<string | null>(null);
+
+function refreshTitlePreview() {
+  if (route.value.kind !== 'upload' || !showTitleReplace.value) {
+    titlePreview.value = null;
+    replaceRegexError.value = null;
+    return;
+  }
+  try {
+    replaceRegexError.value = null;
+    titlePreview.value = previewPublishedTitleReplace(findTitleText.value, replaceTitleText.value, {
+      matchCase: replaceMatchCase.value,
+      useRegex: replaceUseRegex.value,
+    });
+  } catch (e) {
+    replaceRegexError.value = e instanceof Error ? e.message : String(e);
+    titlePreview.value = null;
+  }
+}
+
+watch([showTitleReplace, findTitleText, replaceTitleText, replaceMatchCase, replaceUseRegex], refreshTitlePreview);
+
+function runMassTitleReplace() {
+  if (!findTitleText.value) return;
+  error.value = null;
+  notice.value = null;
+  try {
+    const res = replaceAllPublishedTitles(findTitleText.value, replaceTitleText.value, {
+      matchCase: replaceMatchCase.value,
+      useRegex: replaceUseRegex.value,
+    });
+    if (res.totalInputs === 0) {
+      error.value = 'No editable published title fields found on this page.';
+    } else if (res.updatedInputs === 0) {
+      notice.value = `No matches found across ${res.totalInputs} published title field${res.totalInputs === 1 ? '' : 's'}.`;
+    } else {
+      notice.value = `Replaced ${res.totalOccurrences} occurrence${res.totalOccurrences === 1 ? '' : 's'} across ${res.updatedInputs} title${res.updatedInputs === 1 ? '' : 's'}.`;
+    }
+    refreshTitlePreview();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+  }
+}
 
 const activeId = computed(() => {
   if (requestData.value) return requestData.value.id;
@@ -258,41 +345,22 @@ const activeId = computed(() => {
   return null;
 });
 
-function matchesCurrentUploadSeries(j: DownloadJob): boolean {
-  if (route.value.kind !== 'upload') return false;
-  if (links.value.some((l) => l.id === j.linkId)) return true;
-  if (route.value.mangaId && j.uploadUrl.includes(`manga=${route.value.mangaId}`)) return true;
-  if (requestData.value?.atsuMangaId && j.uploadUrl.includes(`manga=${requestData.value.atsuMangaId}`)) return true;
-  return false;
-}
-
-const isSeriesUploadPage = computed(() => route.value.kind === 'upload' && !!(route.value.mangaId || route.value.sourceId));
-
-const visibleUploadJobs = computed(() => {
-  if (route.value.kind !== 'upload') return [];
-  if (!isSeriesUploadPage.value || showAllUploads.value) return readyJobs.value;
-  const filtered = readyJobs.value.filter(matchesCurrentUploadSeries);
-  return filtered.length ? filtered : isSeriesUploadPage.value && requestData.value ? [] : readyJobs.value;
-});
-
-const visibleActiveJobs = computed(() => {
-  if (route.value.kind !== 'upload') return [];
-  if (!isSeriesUploadPage.value || showAllUploads.value) return activeJobs.value;
-  return activeJobs.value.filter(matchesCurrentUploadSeries);
-});
-
 function readUploadPageTitleHint(): string | null {
   const heading = document.querySelector('h1, h2, [class*="title"]')?.textContent?.trim();
   if (!heading || /^upload/i.test(heading)) return null;
   return heading;
 }
 
+let loadSeq = 0;
+
 async function loadRoute() {
+  const seq = ++loadSeq;
   error.value = null;
   notice.value = null;
   editingTitle.value = false;
   searching.value = false;
   searchingSources.value = [];
+  sourceMatchFilter.value = '';
   requestData.value = null;
   mangabaka.value = null;
   mbMismatch.value = false;
@@ -301,14 +369,15 @@ async function loadRoute() {
   links.value = [];
 
   if (route.value.kind === 'upload') {
-    await loadUploads();
-    if (route.value.sourceId || route.value.mangaId) {
+    if (route.value.sourceId || route.value.mangaId || route.value.mangaBakaId) {
       try {
         const res = await api.resolveUpload({
           sourceId: route.value.sourceId,
           mangaId: route.value.mangaId,
+          mangaBakaId: route.value.mangaBakaId,
           title: readUploadPageTitleHint(),
         });
+        if (seq !== loadSeq) return;
         serverOnline.value = true;
         if (res.request) {
           requestData.value = res.request;
@@ -317,8 +386,18 @@ async function loadRoute() {
           links.value = res.links;
         }
       } catch (e) {
+        if (seq !== loadSeq) return;
         const err = e as Error & { status?: number };
         if (err.status === 0) serverOnline.value = false;
+      }
+    } else {
+      try {
+        await api.settings();
+        if (seq !== loadSeq) return;
+        serverOnline.value = true;
+      } catch {
+        if (seq !== loadSeq) return;
+        serverOnline.value = false;
       }
     }
     return;
@@ -333,8 +412,10 @@ async function loadRoute() {
   if (!lookupId) {
     try {
       await api.settings();
+      if (seq !== loadSeq) return;
       serverOnline.value = true;
     } catch {
+      if (seq !== loadSeq) return;
       serverOnline.value = false;
     }
     return;
@@ -342,12 +423,14 @@ async function loadRoute() {
 
   try {
     const res = await api.request(lookupId);
+    if (seq !== loadSeq) return;
     serverOnline.value = true;
     requestData.value = res.request;
     mangabaka.value = res.mangabaka;
     matches.value = res.matches;
     links.value = res.links;
   } catch (e) {
+    if (seq !== loadSeq) return;
     const err = e as Error & { status?: number };
     if (err.status === 0) serverOnline.value = false;
     else serverOnline.value = true;
@@ -372,18 +455,6 @@ async function checkMangaBaka() {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
     mbChecking.value = false;
-  }
-}
-
-async function loadUploads() {
-  try {
-    const all = await api.downloads();
-    serverOnline.value = true;
-    allJobs.value = all;
-  } catch (e) {
-    const err = e as Error & { status?: number };
-    if (err.status === 0) serverOnline.value = false;
-    error.value = err.message;
   }
 }
 
@@ -464,111 +535,6 @@ async function linkSource(m: SourceMatch) {
   }
 }
 
-async function attachZipToUploadPage(job: DownloadJob) {
-  busy.value = true;
-  error.value = null;
-  notice.value = null;
-  try {
-    const { bytes, filename, mime } = await fetchDownloadFile(job.id);
-    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
-    if (!input) {
-      throw new Error('Could not find file input on this page — use Save ZIP instead');
-    }
-    const copy = new Uint8Array(bytes.byteLength);
-    copy.set(bytes);
-    const file = new File([copy.buffer], filename, { type: mime });
-    const dt = new DataTransfer();
-    dt.items.add(file);
-    input.files = dt.files;
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-    await api.setChapterState([job.chapterId], 'uploaded');
-    allJobs.value = allJobs.value.filter((j) => j.id !== job.id);
-    notice.value = `Attached ${filename} to page`;
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function attachAllZipsToUploadPage() {
-  const jobsToAttach = [...visibleUploadJobs.value];
-  if (!jobsToAttach.length || attachingAuto) return;
-  attachingAuto = true;
-  busy.value = true;
-  error.value = null;
-  notice.value = null;
-  try {
-    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
-    if (!input) {
-      throw new Error('Could not find file input on this page — use Save ZIP instead');
-    }
-    if (input.multiple) {
-      const dt = new DataTransfer();
-      for (const job of jobsToAttach) {
-        const { bytes, filename, mime } = await fetchDownloadFile(job.id);
-        const copy = new Uint8Array(bytes.byteLength);
-        copy.set(bytes);
-        dt.items.add(new File([copy.buffer], filename, { type: mime }));
-      }
-      input.files = dt.files;
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      await api.setChapterState(
-        jobsToAttach.map((j) => j.chapterId),
-        'uploaded',
-      );
-      const attachedIds = new Set(jobsToAttach.map((j) => j.id));
-      allJobs.value = allJobs.value.filter((j) => !attachedIds.has(j.id));
-    } else {
-      for (const job of jobsToAttach) {
-        const { bytes, filename, mime } = await fetchDownloadFile(job.id);
-        const copy = new Uint8Array(bytes.byteLength);
-        copy.set(bytes);
-        const dt = new DataTransfer();
-        dt.items.add(new File([copy.buffer], filename, { type: mime }));
-        input.files = dt.files;
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        await api.setChapterState([job.chapterId], 'uploaded');
-        allJobs.value = allJobs.value.filter((j) => j.id !== job.id);
-      }
-    }
-    notice.value = `Attached ${jobsToAttach.length} ZIP${jobsToAttach.length === 1 ? '' : 's'} to page`;
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    busy.value = false;
-    attachingAuto = false;
-  }
-}
-
-async function maybeAutoAttach() {
-  if (!autoUpload.value || route.value.kind !== 'upload') return;
-  if (visibleUploadJobs.value.length > 0 && visibleActiveJobs.value.length === 0) {
-    await attachAllZipsToUploadPage();
-  }
-}
-
-async function saveZipToDisk(job: DownloadJob) {
-  busy.value = true;
-  error.value = null;
-  try {
-    const { bytes, filename, mime } = await fetchDownloadFile(job.id);
-    const copy = new Uint8Array(bytes.byteLength);
-    copy.set(bytes);
-    const blob = new Blob([copy.buffer], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    busy.value = false;
-  }
-}
-
 let urlCheckTimer: ReturnType<typeof setInterval> | null = null;
 let lastHref = location.href;
 
@@ -638,9 +604,6 @@ async function handleStartServer() {
 }
 
 watch(route, () => void loadRoute());
-watch(autoUpload, (on) => {
-  if (on) void maybeAutoAttach();
-});
 
 useServerEvents((ev) => {
   if (ev.type === 'discovery_start' && ev.requestId === activeId.value) {
@@ -655,23 +618,13 @@ useServerEvents((ev) => {
     if (ev.matches.length > 0) {
       const byUrl = new Map(matches.value.map((m) => [m.seriesUrl, m]));
       for (const m of ev.matches) byUrl.set(m.seriesUrl, m);
-      matches.value = [...byUrl.values()].sort((a, b) => b.score - a.score);
+      matches.value = rankSourceMatches([...byUrl.values()], mangabaka.value?.totalChapters ?? null);
     }
   } else if (ev.type === 'discovery_done' && ev.requestId === activeId.value) {
     searching.value = false;
     searchingSources.value = [];
-  } else if (route.value.kind === 'upload' && ev.type === 'job') {
-    const idx = allJobs.value.findIndex((j) => j.id === ev.job.id);
-    if (idx >= 0) allJobs.value[idx] = ev.job;
-    else allJobs.value.unshift(ev.job);
-    if (ev.job.state === 'done') {
-      void loadUploads().then(() => maybeAutoAttach());
-    }
-  } else if (ev.type === 'downloads_complete') {
+  } else if (ev.type === 'downloads_complete' && links.value.some((l) => l.id === ev.linkId)) {
     notice.value = `${ev.seriesTitle}: All ${ev.count} chapter${ev.count === 1 ? '' : 's'} downloaded!`;
-    if (route.value.kind === 'upload') {
-      void loadUploads().then(() => maybeAutoAttach());
-    }
   }
 });
 </script>
@@ -735,42 +688,74 @@ useServerEvents((ev) => {
       <div v-if="error" class="as-error">{{ error }}</div>
       <div v-if="notice" class="as-ok">{{ notice }}</div>
 
-      <!-- UPLOAD PAGE: Ready ZIPs & Auto-Attach -->
+      <!-- UPLOAD PAGE: Published Title Replace & unresolved hint -->
       <template v-if="route.kind === 'upload'">
+        <div v-if="!requestData" class="as-card">
+          <div class="as-muted">Open a tracked series upload page (from a tracked series) to manage and attach its ready downloads.</div>
+        </div>
+
         <div class="as-card">
           <div class="as-row">
-            <span class="as-title">Ready ZIPs ({{ visibleUploadJobs.length }})</span>
-            <div class="as-row-wrap">
-              <button v-if="visibleUploadJobs.length > 0" class="as-btn primary sm" :disabled="busy" @click="attachAllZipsToUploadPage">
-                <Icon name="upload" /> Attach Zip All
-              </button>
-              <button v-if="isSeriesUploadPage" class="as-btn sm" @click="showAllUploads = !showAllUploads">
-                {{ showAllUploads ? 'This series' : 'Show all' }}
-              </button>
-            </div>
+            <span class="as-title">Published Title Replace</span>
+            <button class="as-btn sm" @click="showTitleReplace = !showTitleReplace">
+              {{ showTitleReplace ? 'Hide' : 'Open' }}
+            </button>
           </div>
-          <label class="as-check-label">
-            <input v-model="autoUpload" type="checkbox" />
-            <span>Upload when downloaded</span>
-          </label>
-          <div v-if="visibleActiveJobs.length" class="as-muted">
-            Downloading {{ visibleActiveJobs.length }} chapter{{ visibleActiveJobs.length === 1 ? '' : 's' }}…
-          </div>
-          <div v-if="!visibleUploadJobs.length && !visibleActiveJobs.length" class="as-muted">
-            No completed chapter ZIPs waiting to upload.
-          </div>
-          <div v-for="j in visibleUploadJobs" :key="j.id" class="as-chap" style="flex-direction: column; align-items: stretch; gap: 6px; padding: 8px 10px">
+
+          <template v-if="showTitleReplace">
+            <input
+              v-model="findTitleText"
+              class="as-input"
+              placeholder="Find text…"
+              @keyup.enter="runMassTitleReplace"
+            />
+            <input
+              v-model="replaceTitleText"
+              class="as-input"
+              placeholder="Replace with (leave empty to remove)…"
+              @keyup.enter="runMassTitleReplace"
+            />
             <div class="as-row">
-              <div style="min-width: 0">
-                <div class="as-chap-name" :title="j.seriesTitle">{{ j.seriesTitle }}</div>
-                <div class="as-muted">{{ j.chapterLabel }} · {{ j.sourceName }}</div>
-              </div>
               <div class="as-row-wrap">
-                <button class="as-btn primary sm" :disabled="busy" @click="attachZipToUploadPage(j)"><Icon name="upload" /> Attach</button>
-                <button class="as-btn sm" :disabled="busy" @click="saveZipToDisk(j)"><Icon name="download" /> Save</button>
+                <label class="as-check-label">
+                  <input v-model="replaceMatchCase" type="checkbox" />
+                  <span>Match case</span>
+                </label>
+                <label class="as-check-label">
+                  <input v-model="replaceUseRegex" type="checkbox" />
+                  <span>Regex</span>
+                </label>
+              </div>
+              <button class="as-btn icon sm" title="Rescan published titles" aria-label="Rescan published titles" @click="refreshTitlePreview">
+                <Icon name="refresh" />
+              </button>
+            </div>
+
+            <div v-if="replaceRegexError" class="as-error">{{ replaceRegexError }}</div>
+            <div v-else-if="titlePreview" class="as-muted">
+              {{ titlePreview.totalInputs }} title field{{ titlePreview.totalInputs === 1 ? '' : 's' }} found
+              <template v-if="findTitleText">
+                · {{ titlePreview.matchingInputs }} matching ({{ titlePreview.totalOccurrences }} occurrence{{ titlePreview.totalOccurrences === 1 ? '' : 's' }})
+              </template>
+            </div>
+
+            <div v-if="titlePreview?.sample" class="as-chap" style="flex-direction: column; align-items: stretch; gap: 2px; padding: 8px 10px">
+              <div class="as-muted" style="text-decoration: line-through; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" :title="titlePreview.sample.before">
+                {{ titlePreview.sample.before }}
+              </div>
+              <div class="as-chap-name" :title="titlePreview.sample.after">
+                {{ titlePreview.sample.after || '(empty)' }}
               </div>
             </div>
-          </div>
+
+            <button
+              class="as-btn primary"
+              :disabled="busy || !findTitleText || !!replaceRegexError || (titlePreview?.matchingInputs ?? 0) === 0"
+              @click="runMassTitleReplace"
+            >
+              <Icon name="edit" /> Replace All
+            </button>
+          </template>
         </div>
       </template>
 
@@ -834,7 +819,14 @@ useServerEvents((ev) => {
           </div>
         </div>
 
-        <LinkSection v-for="l in links" :key="l.id" :link="l" @unlinked="loadRoute" @updated="loadRoute" />
+        <LinkSection
+          v-for="l in links"
+          :key="l.id"
+          :link="l"
+          :is-upload-page="route.kind === 'upload'"
+          @unlinked="loadRoute"
+          @updated="loadRoute"
+        />
 
         <div class="as-card">
           <div class="as-row">
@@ -863,7 +855,35 @@ useServerEvents((ev) => {
             <button class="as-btn" :disabled="busy || !customSourceUrl.trim()" @click="addCustomSource"><Icon name="plus" /> Add</button>
           </div>
 
-          <div v-for="m in matches" :key="m.seriesUrl" class="as-chap" style="align-items: center">
+          <div v-if="matches.length > 0" class="as-row" style="gap: 6px">
+            <input
+              v-model="sourceMatchFilter"
+              class="as-input"
+              type="search"
+              placeholder="Filter matches…"
+              style="flex: 1; height: 30px; font-size: 12px"
+            />
+            <select
+              v-model="sourceMatchSort"
+              class="as-input"
+              aria-label="Sort sources"
+              style="width: auto; height: 30px; padding: 0 8px; font-size: 12px"
+            >
+              <option value="best">Best match</option>
+              <option value="chapters">Most chapters</option>
+              <option value="name">Close name</option>
+            </select>
+          </div>
+          <label v-if="hasSourceErrors" class="as-check-label">
+            <input v-model="hideSourceErrors" type="checkbox" />
+            <span>Hide failed sources</span>
+          </label>
+
+          <div v-if="matches.length > 0 && !filteredMatches.length" class="as-muted">
+            No sources match "{{ sourceMatchFilter }}".
+          </div>
+
+          <div v-for="m in filteredMatches" :key="m.seriesUrl" class="as-chap" style="align-items: center">
             <img
               v-if="m.cover && !brokenCovers.has(m.seriesUrl)"
               :src="m.cover"
