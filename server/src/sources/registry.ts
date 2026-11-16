@@ -7,14 +7,13 @@ import { kingofshojo } from './adapters/kingofshojo.ts';
 import { mgeko } from './adapters/mgeko.ts';
 import { mangafreak } from './adapters/mangafreak.ts';
 import { mangapill } from './adapters/mangapill.ts';
-import { mgread } from './adapters/mgread.ts';
 import { nuviatoon } from './adapters/nuviatoon.ts';
 import { webtoon } from './adapters/webtoon.ts';
 import { SourceHttp } from './http.ts';
 import { matchesUrl, type SourceAdapter } from './types.ts';
 
 // Register new source sites here.
-const ADAPTERS: SourceAdapter[] = [nuviatoon, mangadex, mgread, mgeko, kingofshojo, webtoon, mangapill, lewdmanhwa, mangafreak, arenascan];
+const ADAPTERS: SourceAdapter[] = [nuviatoon, mangadex, mgeko, kingofshojo, webtoon, mangapill, lewdmanhwa, mangafreak, arenascan];
 
 export class SourceRegistry {
   readonly http: SourceHttp;
