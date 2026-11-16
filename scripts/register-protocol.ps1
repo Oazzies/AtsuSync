@@ -1,6 +1,5 @@
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
 $cmdScript = Join-Path $PSScriptRoot 'start-server.cmd'
 
 if (-not (Test-Path $cmdScript)) {
@@ -19,7 +18,7 @@ New-Item -Path $iconKey -Force | Out-Null
 Set-ItemProperty -Path $iconKey -Name '(Default)' -Value 'cmd.exe,0'
 
 New-Item -Path $cmdKey -Force | Out-Null
-$commandValue = "cmd.exe /c start `"AtsuSync Server`" cmd.exe /k `"`"$cmdScript`"`""
+$commandValue = "cmd.exe /c start `"AtsuSync Server`" cmd.exe /c `"`"$cmdScript`"`""
 Set-ItemProperty -Path $cmdKey -Name '(Default)' -Value $commandValue
 
 Write-Host "Registered atsusync:// protocol handler -> $cmdScript"
