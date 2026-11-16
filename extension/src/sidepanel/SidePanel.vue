@@ -1019,11 +1019,12 @@ async function syncCookie() {
               <a
                 v-else-if="updateStatus?.updateAvailable"
                 class="sp-btn primary sm"
-                :href="updateStatus.repoUrl"
+                :href="updateStatus.downloadUrl"
                 target="_blank"
                 rel="noopener"
               >
-                GitHub
+                <Icon name="download" />
+                Download ZIP
               </a>
             </div>
           </div>
