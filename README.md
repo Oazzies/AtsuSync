@@ -65,7 +65,7 @@ All requests go through `SourceHttp`, which applies the adapter's `rateLimit` pe
 
 ```bash
 npm test            # offline, uses saved fixtures
-npm run test:live   # hits nuviatoon.net and atsu.moe once each
+npm run test:live   # hits nuviatoon.org and atsu.moe once each
 ```
 
 ## Uploading a chapter

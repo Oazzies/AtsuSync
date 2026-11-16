@@ -2,7 +2,7 @@ import * as cheerio from 'cheerio';
 import { extractJsonAfterKey, rscPayload } from '../nextjs.ts';
 import type { PageRef, SourceAdapter, SourceChapter, SourceSeries, SourceSeriesHit } from '../types.ts';
 
-const BASE = 'https://nuviatoon.net';
+const BASE = 'https://nuviatoon.org';
 
 interface NuviaChapter {
   id: string;
@@ -25,7 +25,7 @@ interface NuviaPage {
  */
 export function parseSitemap(xml: string): SourceSeriesHit[] {
   const hits: SourceSeriesHit[] = [];
-  for (const m of xml.matchAll(/<loc>\s*(https:\/\/nuviatoon\.net\/comics\/([a-z0-9-]+))\s*<\/loc>/gi)) {
+  for (const m of xml.matchAll(/<loc>\s*(https:\/\/nuviatoon\.org\/comics\/([a-z0-9-]+))\s*<\/loc>/gi)) {
     const slug = m[2]!;
     hits.push({ title: slug.split('-').map((w) => w[0]!.toUpperCase() + w.slice(1)).join(' '), url: m[1]! });
   }
@@ -115,7 +115,7 @@ export const nuviatoon: SourceAdapter = {
   name: 'Nuviatoon',
   baseUrl: BASE,
   kind: 'scanlation',
-  hosts: ['nuviatoon.net'],
+  hosts: ['nuviatoon.org', 'nuviatoon.net'],
   rateLimit: { rpm: 30, concurrency: 2 },
 
   async search(_title, http) {
@@ -131,13 +131,14 @@ export const nuviatoon: SourceAdapter = {
   },
 
   async getChapterPages(chapter, http) {
-    const html = await http.text(chapter.url);
+    const chapterUrl = `${BASE}${new URL(chapter.url).pathname}`;
+    const html = await http.text(chapterUrl);
     const id = parseChapterId(html);
-    if (!id) throw new Error(`Could not find chapter id on ${chapter.url}`);
+    if (!id) throw new Error(`Could not find chapter id on ${chapterUrl}`);
     const json = await http.json<{ data?: { pages?: NuviaPage[] } }>(`${BASE}/api/comic-chapters/${id}/content`, {
-      headers: { referer: chapter.url },
+      headers: { referer: chapterUrl },
     });
-    const pages = parsePages(json, chapter.url);
+    const pages = parsePages(json, chapterUrl);
     if (pages.length === 0) throw new Error('No pages returned (chapter may be locked)');
     return pages;
   },

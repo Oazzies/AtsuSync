@@ -6,13 +6,13 @@ import { AtsuClient } from '../src/atsu/client.ts';
 
 describe('live', () => {
   const http = new SourceHttp();
-  http.configureHost('nuviatoon.net', nuviatoon.rateLimit);
+  http.configureHost('nuviatoon.org', nuviatoon.rateLimit);
 
   it('nuviatoon search + series still parse', async () => {
     const hits = await nuviatoon.search!('Heart Aching', http);
     expect(hits.some((h) => h.url.endsWith('/comics/heart-aching'))).toBe(true);
-    await expect(http.assertAllowed('https://nuviatoon.net/search?q=x')).rejects.toThrow(/robots/);
-    const s = await nuviatoon.getSeries('https://nuviatoon.net/comics/heart-aching', http);
+    await expect(http.assertAllowed('https://nuviatoon.org/search?q=x')).rejects.toThrow(/robots/);
+    const s = await nuviatoon.getSeries('https://nuviatoon.org/comics/heart-aching', http);
     expect(s.chapters.length).toBeGreaterThan(30);
   }, 30_000);
 
