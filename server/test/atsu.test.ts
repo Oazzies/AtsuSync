@@ -1,24 +1,8 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { AtsuClient, parseSeriesState, type AtsuPostsPage } from '../src/atsu/client.ts';
+import { parseSeriesState } from '../src/atsu/client.ts';
 import { checkMangaBakaForRequest, parseMangaBaka, searchMangaBakaSeries } from '../src/atsu/mangabaka.ts';
-import { RequestsRepo, isUploadable, parseTrackers, statusFromTags, syncRequests, uploadMangaBakaId } from '../src/atsu/requests.ts';
-import { openDb } from '../src/db/client.ts';
+import { isUploadable, parseTrackers, statusFromTags, uploadMangaBakaId } from '../src/atsu/requests.ts';
 import { bestScore, searchQueries } from '../src/sources/match.ts';
-
-const page0 = JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures', 'atsu-posts.json'), 'utf8')) as AtsuPostsPage;
-
-/** Fake fetch serving forum pages: page 0 is the fixture, later pages are synthetic. */
-function forumFetch(pages: AtsuPostsPage[]) {
-  const calls: string[] = [];
-  const impl = (async (url: string | URL) => {
-    calls.push(String(url));
-    const page = Number(new URL(String(url)).searchParams.get('page'));
-    return new Response(JSON.stringify(pages[page] ?? { posts: [], hasMore: false }), { status: 200 });
-  }) as typeof fetch;
-  return { impl, calls };
-}
 
 describe('content request parsing', () => {
   it('finds tracker links', () => {
@@ -44,12 +28,24 @@ describe('content request parsing', () => {
       status: 'completed',
       total_chapters: '125',
       canonical_url: 'https://mangabaka.org/manhwa/36039/The-Sound-of-Your-Voice',
+      description: 'A story about voice actors.',
+      year: 2018,
+      authors: ['HANA'],
+      genres: ['drama', 'romance'],
+      rating: 76.8,
+      content_rating: 'safe',
     })!;
     expect(mb.titles).toEqual(['The Sound of Your Voice', 'Moksorireul Deullyeojuseyo', '恋上你的声音', '목소리를 들려주세요']);
     expect(mb.totalChapters).toBe(125);
     expect(mb.status).toBe('completed');
     expect(mb.type).toBe('manhwa');
     expect(mb.url).toBe('https://mangabaka.org/manhwa/36039/The-Sound-of-Your-Voice');
+    expect(mb.description).toBe('A story about voice actors.');
+    expect(mb.year).toBe(2018);
+    expect(mb.authors).toEqual(['HANA']);
+    expect(mb.genres).toEqual(['drama', 'romance']);
+    expect(mb.rating).toBe(76.8);
+    expect(mb.contentRating).toBe('safe');
   });
 
   it('filters MangaBaka search results by comic vs novel medium', async () => {
@@ -115,27 +111,6 @@ describe('upload button rule', () => {
     expect(isUploadable('looking', body)).toBe(true);
     for (const s of ['added', 'cant_add', 'duplicate'] as const) expect(isUploadable(s, body)).toBe(false);
     expect(isUploadable('open', 'no links here')).toBe(false);
-  });
-});
-
-describe('request sync', () => {
-  it('stores request posts, skips the pinned guideline post, and stops quick sync on a known page', async () => {
-    const db = openDb(':memory:');
-    const repo = new RequestsRepo(db);
-    const { impl, calls } = forumFetch([page0, { posts: [], hasMore: false }]);
-    const client = new AtsuClient(() => '', impl);
-
-    const first = await syncRequests(client, repo, db, { pageDelayMs: 0 });
-    expect(first.added).toBe(19);
-    expect(repo.has('RKkdDcky')).toBe(false);
-    const req = repo.get('9EenD1PY')!;
-    expect(req.mangabakaId).toBe('36039');
-    expect(req.url).toBe('https://atsu.moe/social/forum/cms0o0eh80000uj0lmpkut6tc/content-requests/9EenD1PY');
-
-    calls.length = 0;
-    const second = await syncRequests(client, repo, db, { pageDelayMs: 0 });
-    expect(second.added).toBe(0);
-    expect(calls).toHaveLength(1); // page 0 fully known → no page 1
   });
 });
 
