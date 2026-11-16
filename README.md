@@ -9,22 +9,19 @@ Local helper + browser extension for uploading to Atsumaru [content requests](ht
 - **Nothing is ever uploaded for you**: Download turns a chapter into a `.zip` or `.epub` (and auto-attaches it on `atsu.moe/upload`), then you review and submit it yourself.
 
 ## Requirements
-
-- **Node.js >= 22.5** (on Windows, `setup.cmd` will offer to install it for you automatically if missing)
 - **Chromium browser** (Chrome, Edge, Brave, Vivaldi, etc.)
 
 ## Install
 
-1. Download the latest `atsusync-v*.zip` from [GitHub Releases](https://github.com/Oazzies/AtsuSync/releases/latest) and extract it to a permanent folder (Chrome loads the extension directly from inside this folder).
-2. Run the setup (no Git required):
+1. Download the latest `atsusync-v*.zip` from [GitHub Releases](https://github.com/Oazzies/AtsuSync/releases/latest) and extract it to a permanent folder (Chrome loads the extension directly from inside this folder, so don't move it after).
+2. Run the setup (in the extracted folder):
    - **Windows**: double-click **`setup.cmd`**
-   - **macOS**: double-click **`setup.command`** *(if macOS blocks an unsigned file, Right-click → Open)*
-   - **Linux**: double-click **`setup.sh`** and choose **Run in Terminal** *(or run `./setup.sh`)*
+   - **macOS / Linux**: run **`./setup.sh`**
 3. Load the extension in your browser:
-   1. Open `chrome://extensions` (or `edge://extensions` / `brave://extensions`)
-   2. Enable **Developer mode**
-   3. Click **Load unpacked** and select the `extension/dist` folder inside your AtsuSync folder
-4. Open `https://atsu.moe`, open the AtsuSync side panel, and click **Start Server**. Your `atsu.moe` session is synced automatically.
+   1. Open in browser URL bar: `chrome://extensions` (or `edge://extensions` / `brave://extensions`)
+   2. Enable **Developer mode** top right
+   3. Click **Load unpacked** (top left) and select the `extension/dist` folder inside your AtsuSync folder
+4. Open `https://atsu.moe`, open the AtsuSync side panel, and click **Start Server** (on macOS, run `./scripts/start-server.sh`). Your `atsu.moe` account session is synced automatically.
 
 ## How to Use
 
@@ -48,10 +45,3 @@ AtsuSync checks [GitHub Releases](https://github.com/Oazzies/AtsuSync/releases) 
 
 *(Manual fallback: download the latest `atsusync-v*.zip` from [GitHub Releases](https://github.com/Oazzies/AtsuSync/releases/latest), extract it over your AtsuSync folder, run `setup.cmd` / `./setup.sh`, and click the reload icon on AtsuSync in `chrome://extensions`.)*
 
-## Releasing (Maintainers)
-
-Releases are created manually via GitHub Actions (nothing runs on regular commits):
-
-1. Go to **Actions → Release → Run workflow** on GitHub.
-2. Choose a version bump (`patch`, `minor`, `major`, or `custom` with an explicit `X.Y.Z` version).
-3. The workflow bumps `package.json`, `package-lock.json`, and `extension/public/manifest.json`, runs typecheck, tests, and extension build, packages `atsusync-v<version>.zip`, tags the commit, and publishes the GitHub Release.
