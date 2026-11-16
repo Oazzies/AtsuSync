@@ -6,9 +6,15 @@ import { matchesUrl } from '../src/sources/types.ts';
 
 const fx = (name: string) => JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures', name), 'utf8'));
 
-const ch = (id: string, chapter: string | null, over: Partial<MdChapter['attributes']> = {}): MdChapter => ({
+const ch = (
+  id: string,
+  chapter: string | null,
+  over: Partial<MdChapter['attributes']> = {},
+  relationships?: MdChapter['relationships'],
+): MdChapter => ({
   id,
   attributes: { chapter, title: null, translatedLanguage: 'en', externalUrl: null, publishAt: '2020-01-01T00:00:00+00:00', pages: 20, ...over },
+  relationships,
 });
 
 describe('mangadex adapter', () => {
@@ -38,21 +44,29 @@ describe('mangadex adapter', () => {
     expect(chapters[0]).toMatchObject({ number: 1, url: 'https://mangadex.org/chapter/85bf3bb4-b467-4613-bdb4-55c15d0b215e', locked: false });
   });
 
-  it('only keeps english chapters, one per number, skipping external/empty/unnumbered ones', () => {
+  it('keeps english chapters, includes hosted external archives, skips external stubs/empty/unnumbered, and tracks group alternatives', () => {
+    const grp = (name: string) => [{ type: 'scanlation_group', attributes: { name } }];
     const out = parseFeed([
-      ch('a', '1', { pages: 10 }),
-      ch('b', '1', { pages: 30 }), // more pages wins
+      ch('a', '1', { pages: 10 }, grp('Group A')),
+      ch('b', '1', { pages: 30 }, grp('Group B')), // more pages wins
       ch('c', '2', { translatedLanguage: 'fr' }),
-      ch('d', '3', { externalUrl: 'https://example.com' }),
-      ch('e', '4', { pages: 0 }),
+      ch('d', '3', { externalUrl: 'https://mangaplus.shueisha.co.jp/viewer/1', pages: 1 }), // external-only stub → skipped
+      ch('d2', '4', { externalUrl: 'https://www.bilibilicomics.com/mc1894/184719', pages: 50 }, grp('Bilibili Comics')), // hosted archive → kept
+      ch('e', '5', { pages: 0 }),
       ch('f', null),
-      ch('g', '5.5', { title: 'Extra' }),
-      ch('h', '5.5', { pages: 20, publishAt: '2019-01-01T00:00:00+00:00' }), // tie → earliest
+      ch('g', '5.5', { title: 'Extra' }, grp('Group C')),
+      ch('h', '5.5', { pages: 20, publishAt: '2019-01-01T00:00:00+00:00' }, grp('Group D')), // tie → earliest
     ]);
-    expect(out.map((c) => [c.number, c.url.split('/').pop()])).toEqual([
-      [1, 'b'],
-      [5.5, 'h'],
+    expect(out.map((c) => [c.number, c.url.split('/').pop(), c.group])).toEqual([
+      [1, 'b', 'Group B'],
+      [4, 'd2', 'Bilibili Comics'],
+      [5.5, 'h', 'Group D'],
     ]);
+    expect(out[0]!.alternatives).toEqual([
+      { group: 'Group A', url: 'https://mangadex.org/chapter/a', label: 'Chapter 1', title: undefined, date: '2020-01-01T00:00:00+00:00' },
+    ]);
+    expect(out[1]!.alternatives).toBeUndefined();
+    expect(out[2]!.alternatives?.map((a) => a.group)).toEqual(['Group C']);
   });
 
   it('treats unnumbered chapters as chapter 1 only for oneshots', () => {
@@ -63,7 +77,7 @@ describe('mangadex adapter', () => {
   it('explains why a series with no english chapters is empty', () => {
     const manga = (langs?: string[]) => ({ id: 'x', attributes: { title: { en: 'X' }, availableTranslatedLanguages: langs } });
     expect(emptyReason(manga(['id', 'es']))).toBe('no English chapters (only id, es)');
-    expect(emptyReason(manga(['en']))).toMatch(/external links or unavailable/);
+    expect(emptyReason(manga(['en']))).toMatch(/no hosted pages or are unavailable/);
     expect(emptyReason(manga())).toBe('no English chapters');
   });
 

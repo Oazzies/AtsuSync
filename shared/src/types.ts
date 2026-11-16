@@ -91,6 +91,14 @@ export interface SourceInfo {
   searchable: boolean;
 }
 
+export interface SourceChapterAlt {
+  group: string;
+  url: string;
+  label?: string;
+  title?: string;
+  date?: string;
+}
+
 export interface SourceChapter {
   number: number;
   label: string;
@@ -98,6 +106,10 @@ export interface SourceChapter {
   title?: string;
   date?: string;
   locked?: boolean;
+  /** Scanlation group or official uploader name on multi-source aggregators (e.g. MangaDex). */
+  group?: string;
+  /** Other uploads for the same chapter number from different groups/sources on this site. */
+  alternatives?: SourceChapterAlt[];
 }
 
 export interface SourceSeriesHit {
@@ -171,6 +183,8 @@ export interface LinkChapter {
   label: string;
   url: string;
   locked: boolean;
+  group: string | null;
+  alternatives: SourceChapterAlt[];
   state: ChapterState;
   onAtsu: boolean;
   firstSeenAt: number;

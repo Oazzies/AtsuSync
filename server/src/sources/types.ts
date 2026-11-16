@@ -1,7 +1,7 @@
 import type { SourceChapter, SourceKind, SourceSeries, SourceSeriesHit } from '@atsusync/shared';
 import type { SourceHttp } from './http.ts';
 
-export type { SourceChapter, SourceKind, SourceSeries, SourceSeriesHit };
+export type { SourceChapter, SourceChapterAlt, SourceKind, SourceSeries, SourceSeriesHit };
 
 /** A single image to download for a chapter, with any headers the host requires. */
 export interface PageRef {

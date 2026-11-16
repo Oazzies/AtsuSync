@@ -1,4 +1,4 @@
-import type { PageRef, SourceAdapter, SourceChapter, SourceSeries, SourceSeriesHit } from '../types.ts';
+import type { PageRef, SourceAdapter, SourceChapter, SourceChapterAlt, SourceSeries, SourceSeriesHit } from '../types.ts';
 import type { SourceHttp } from '../http.ts';
 
 const BASE = 'https://mangadex.org';
@@ -29,6 +29,7 @@ export interface MdChapter {
     publishAt: string;
     pages: number;
   };
+  relationships?: { id?: string; type: string; attributes?: { name?: string; username?: string } }[];
 }
 
 export interface MdAtHome {
@@ -64,16 +65,28 @@ export function parseSearch(json: { data?: MdManga[] }): SourceSeriesHit[] {
   return (json.data ?? []).map((m) => ({ ...titles(m), url: `${BASE}/title/${m.id}`, cover: coverOf(m) }));
 }
 
+const groupOf = (c: MdChapter): string | undefined => {
+  const groups = (c.relationships ?? [])
+    .filter((r) => r.type === 'scanlation_group' && r.attributes?.name)
+    .map((r) => r.attributes!.name!);
+  if (groups.length) return groups.join(', ');
+  return c.relationships?.find((r) => r.type === 'user' && r.attributes?.username)?.attributes?.username;
+};
+
 /**
  * English chapters only. Several groups often upload the same chapter number; Atsu tracks one
- * entry per number, so keep a single deterministic pick (most pages, then earliest upload).
- * External-link chapters (no hosted pages) are skipped. Unnumbered chapters are skipped too,
- * except in a series with no numbered chapters at all (a oneshot), where they count as chapter 1.
+ * primary entry per number (most pages, non-external on ties, then earliest upload) and keeps
+ * other groups' uploads as `alternatives` so the user can see or switch sources.
+ * External-link stubs (e.g. MangaPlus with 0–1 placeholder page) are skipped, while official
+ * archives that still host all pages on MangaDex (e.g. Bilibili Comics, pages > 1) are kept.
+ * Unnumbered chapters are skipped too, except in a series with no numbered chapters at all (a
+ * oneshot), where they count as chapter 1.
  */
 export function parseFeed(chapters: MdChapter[]): SourceChapter[] {
   const usable = chapters.filter((c) => {
     const a = c.attributes;
-    return a.translatedLanguage === LANG && !a.externalUrl && !a.isUnavailable && a.pages > 0;
+    const hosted = !a.externalUrl || a.pages > 1;
+    return a.translatedLanguage === LANG && hosted && !a.isUnavailable && a.pages > 0;
   });
   const numberOf = (c: MdChapter): number | null => {
     const raw = c.attributes.chapter;
@@ -81,30 +94,51 @@ export function parseFeed(chapters: MdChapter[]): SourceChapter[] {
     return raw == null || raw === '' || !Number.isFinite(n) ? null : n;
   };
   const oneshot = usable.every((c) => numberOf(c) === null);
-  const best = new Map<number, MdChapter>();
+  const byNumber = new Map<number, MdChapter[]>();
   for (const c of usable) {
-    const a = c.attributes;
     const n = numberOf(c) ?? (oneshot ? 1 : null);
     if (n === null) continue;
-    const cur = best.get(n)?.attributes;
-    if (!cur || a.pages > cur.pages || (a.pages === cur.pages && a.publishAt < cur.publishAt)) best.set(n, c);
+    const list = byNumber.get(n);
+    if (list) list.push(c);
+    else byNumber.set(n, [c]);
   }
-  return [...best.entries()]
+  const byQuality = (a: MdChapter, b: MdChapter) => {
+    if (b.attributes.pages !== a.attributes.pages) return b.attributes.pages - a.attributes.pages;
+    const extDiff = Number(!!a.attributes.externalUrl) - Number(!!b.attributes.externalUrl);
+    if (extDiff !== 0) return extDiff;
+    return a.attributes.publishAt < b.attributes.publishAt ? -1 : a.attributes.publishAt > b.attributes.publishAt ? 1 : 0;
+  };
+  const labelOf = (c: MdChapter, number: number) => `Chapter ${number}${c.attributes.title ? ` — ${c.attributes.title}` : ''}`;
+
+  return [...byNumber.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([number, c]) => ({
-      number,
-      label: `Chapter ${number}${c.attributes.title ? ` — ${c.attributes.title}` : ''}`,
-      url: `${BASE}/chapter/${c.id}`,
-      title: c.attributes.title ?? undefined,
-      date: c.attributes.publishAt,
-      locked: false,
-    }));
+    .map(([number, list]) => {
+      const sorted = [...list].sort(byQuality);
+      const primary = sorted[0]!;
+      const alternatives: SourceChapterAlt[] = sorted.slice(1).map((alt) => ({
+        group: groupOf(alt) ?? 'Unknown group',
+        url: `${BASE}/chapter/${alt.id}`,
+        label: labelOf(alt, number),
+        title: alt.attributes.title ?? undefined,
+        date: alt.attributes.publishAt,
+      }));
+      return {
+        number,
+        label: labelOf(primary, number),
+        url: `${BASE}/chapter/${primary.id}`,
+        title: primary.attributes.title ?? undefined,
+        date: primary.attributes.publishAt,
+        locked: false,
+        group: groupOf(primary),
+        alternatives: alternatives.length ? alternatives : undefined,
+      };
+    });
 }
 
 /** MangaDex lists a series under every language it has; only English chapters are usable here. */
 export function emptyReason(m: MdManga): string {
   const langs = m.attributes.availableTranslatedLanguages ?? [];
-  if (langs.includes(LANG)) return 'English chapters are only external links or unavailable';
+  if (langs.includes(LANG)) return 'English chapters have no hosted pages or are unavailable';
   return langs.length ? `no English chapters (only ${langs.join(', ')})` : 'no English chapters';
 }
 
@@ -119,7 +153,7 @@ export function parsePages(json: MdAtHome): PageRef[] {
 async function fetchFeed(id: string, http: SourceHttp): Promise<MdChapter[]> {
   const out: MdChapter[] = [];
   for (let offset = 0; ; offset += FEED_PAGE) {
-    const url = `${API}/manga/${id}/feed?translatedLanguage[]=${LANG}&includeExternalUrl=0&${RATINGS}&order[chapter]=asc&limit=${FEED_PAGE}&offset=${offset}`;
+    const url = `${API}/manga/${id}/feed?translatedLanguage[]=${LANG}&includes[]=scanlation_group&includes[]=user&${RATINGS}&order[chapter]=asc&limit=${FEED_PAGE}&offset=${offset}`;
     const page = await http.json<{ data: MdChapter[]; total: number }>(url, { cacheMs: 10 * 60_000 });
     out.push(...page.data);
     if (page.data.length === 0 || offset + FEED_PAGE >= page.total) return out;
