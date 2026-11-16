@@ -15,15 +15,15 @@ Local helper + browser extension for uploading to Atsumaru [content requests](ht
 
 ## Install
 
-1. Download the latest `atsusync-v*.zip` from [GitHub Releases](https://github.com/Oazzies/AtsuSync/releases/latest) and extract the folder.
-2. Run the setup:
+1. Download the latest `atsusync-v*.zip` from [GitHub Releases](https://github.com/Oazzies/AtsuSync/releases/latest) and extract it to a permanent folder (Chrome loads the extension directly from inside this folder).
+2. Run the setup (no Git required):
    - **Windows**: double-click **`setup.cmd`**
-   - **macOS / Linux**: run **`setup.sh`**
+   - **macOS / Linux**: run **`./setup.sh`**
 3. Load the extension in your browser:
    1. Open `chrome://extensions` (or `edge://extensions` / `brave://extensions`)
    2. Enable **Developer mode**
    3. Click **Load unpacked** and select the `extension/dist` folder inside your AtsuSync folder
-4. Open `https://atsu.moe`, open the AtsuSync side panel, and click **Start Server**. Your `atsu.moe` session is synced automatically.
+4. Open `https://atsu.moe`, open the AtsuSync side panel, and click **Start Server** (on macOS, run `./scripts/start-server.sh`). Your `atsu.moe` session is synced automatically.
 
 ## How to Use
 
@@ -39,4 +39,18 @@ Built-in sites and **LNReader** (novels) work out of the box. **Suwayomi** (Keiy
 
 ## Updating
 
-When an update is available, open the AtsuSync side panel → **Settings → Updates** and click **Update & Restart**. AtsuSync will download the latest release, update your files (keeping your `data/` folder and `.env` intact), restart the local server, and reload the extension automatically.
+AtsuSync checks [GitHub Releases](https://github.com/Oazzies/AtsuSync/releases) for new versions automatically.
+
+1. Open the AtsuSync side panel → **Settings → Updates**.
+2. Click **Update & Restart**.
+3. AtsuSync will download the latest release, update your files (keeping your `data/` folder, downloads, and `.env` intact), install any updated dependencies, restart the local server, and reload the extension automatically.
+
+*(Manual fallback: download the latest `atsusync-v*.zip` from [GitHub Releases](https://github.com/Oazzies/AtsuSync/releases/latest), extract it over your AtsuSync folder, run `setup.cmd` / `./setup.sh`, and click the reload icon on AtsuSync in `chrome://extensions`.)*
+
+## Releasing (Maintainers)
+
+Releases are created manually via GitHub Actions (nothing runs on regular commits):
+
+1. Go to **Actions → Release → Run workflow** on GitHub.
+2. Choose a version bump (`patch`, `minor`, `major`, or `custom` with an explicit `X.Y.Z` version).
+3. The workflow bumps `package.json`, `package-lock.json`, and `extension/public/manifest.json`, runs typecheck, tests, and extension build, packages `atsusync-v<version>.zip`, tags the commit, and publishes the GitHub Release.
