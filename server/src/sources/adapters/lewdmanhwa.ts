@@ -111,6 +111,7 @@ export const lewdmanhwa: SourceAdapter = {
   name: 'LewdManhwa',
   baseUrl: BASE,
   kind: 'aggregator',
+  nsfw: true,
   hosts: ['lewdmanhwa.com'],
   rateLimit: { rpm: 30, concurrency: 2 },
 

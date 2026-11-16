@@ -1,4 +1,12 @@
-import { rankSourceMatches, type ContentRequest, type MangaBaka, type SourceMatch } from '@atsusync/shared';
+import {
+  matchesSourceFilter,
+  rankSourceMatches,
+  type ContentRequest,
+  type MangaBaka,
+  type SourceMatch,
+  type SourceSearchFilter,
+} from '@atsusync/shared';
+export { matchesSourceFilter };
 import type { Db } from '../db/client.ts';
 import { tx } from '../db/client.ts';
 import { events } from '../events.ts';
@@ -24,11 +32,14 @@ interface MatchRow {
   fetched_at: number;
 }
 
+/** Checks whether a source adapter passes the user's Find sources filter. */
 /**
  * On-demand lookup of which enabled sources carry a request's series. Nothing here runs
  * in the background — only when the user presses "Find sources" on a request.
  */
 export class Discovery {
+  private inflightFinds = new Map<string, { promise: Promise<SourceMatch[]>; abort: AbortController }>();
+
   constructor(
     private db: Db,
     private sources: SourceRegistry,
@@ -67,37 +78,68 @@ export class Discovery {
     return titles.filter(Boolean);
   }
 
-  async find(req: ContentRequest): Promise<SourceMatch[]> {
+  find(req: ContentRequest, filter?: Partial<SourceSearchFilter>): Promise<SourceMatch[]> {
+    const existing = this.inflightFinds.get(req.id);
+    if (existing) return existing.promise;
+    const abort = new AbortController();
+    const promise = this.runFind(req, filter, abort.signal).finally(() => this.inflightFinds.delete(req.id));
+    this.inflightFinds.set(req.id, { promise, abort });
+    return promise;
+  }
+
+  stop(requestId: string): boolean {
+    const existing = this.inflightFinds.get(requestId);
+    if (!existing) return false;
+    existing.abort.abort();
+    return true;
+  }
+
+  private async runFind(req: ContentRequest, filter: Partial<SourceSearchFilter> | undefined, signal: AbortSignal): Promise<SourceMatch[]> {
     const mb = await this.resolveMangaBaka(req);
+    if (signal.aborted) {
+      return this.cached(req.id, mb?.totalChapters ?? null);
+    }
     const titles = await this.titlesFor(req, mb);
     const queries = searchQueries(titles);
     // A Novel request only searches novel sources; comic requests never search them.
     const medium = wantsNovel(req) ? 'novel' : 'comic';
-    const adapters = this.sources.enabled().filter((a) => a.search && mediumOf(a) === medium);
+    const adapters = this.sources
+      .enabled()
+      .filter((a) => a.search && mediumOf(a) === medium && matchesSourceFilter(a, filter));
     events.emitEvent({
       type: 'discovery_start',
       requestId: req.id,
       sources: adapters.map((a) => ({ id: a.id, name: a.name })),
     });
     let matchCount = 0;
+    const collected: Omit<MatchRow, 'request_id'>[] = [];
+    const abortPromise = new Promise<void>((resolve) => {
+      if (signal.aborted) resolve();
+      else signal.addEventListener('abort', () => resolve(), { once: true });
+    });
     try {
-      const results = await Promise.all(
-        adapters.map(async (a) => {
-          const found = await this.searchOne(a, titles, queries, mb);
-          const searchError = found.length === 1 && found[0]!.series_url.endsWith('#search-error') ? found[0]!.error : null;
-          const valid = searchError ? [] : found;
-          events.emitEvent({
-            type: 'discovery_progress',
-            requestId: req.id,
-            sourceId: a.id,
-            sourceName: a.name,
-            matches: valid.map((r) => this.rowToMatch({ ...r, request_id: req.id })),
-            error: searchError,
-          });
-          return valid;
-        }),
-      );
-      const rows = results.flat().map((m) => ({ ...m, request_id: req.id }));
+      await Promise.race([
+        Promise.all(
+          adapters.map(async (a) => {
+            if (signal.aborted) return;
+            const found = await this.searchOne(a, titles, queries, mb);
+            if (signal.aborted) return;
+            const searchError = found.length === 1 && found[0]!.series_url.endsWith('#search-error') ? found[0]!.error : null;
+            const valid = searchError ? [] : found;
+            collected.push(...valid);
+            events.emitEvent({
+              type: 'discovery_progress',
+              requestId: req.id,
+              sourceId: a.id,
+              sourceName: a.name,
+              matches: valid.map((r) => this.rowToMatch({ ...r, request_id: req.id })),
+              error: searchError,
+            });
+          }),
+        ),
+        abortPromise,
+      ]);
+      const rows = collected.map((m) => ({ ...m, request_id: req.id }));
       matchCount = rows.length;
       tx(this.db, () => {
         this.db.prepare('DELETE FROM source_matches WHERE request_id = ?').run(req.id);

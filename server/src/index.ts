@@ -3,7 +3,17 @@ import { buildApp } from './app.ts';
 import { config } from './settings.ts';
 
 const dataDir = resolve(import.meta.dirname, '../..', config.dataDir);
-const { app } = buildApp({ dbFile: join(dataDir, 'atsusync.db') });
+let shuttingDown = false;
+const shutdown = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const forceExit = setTimeout(() => process.exit(0), 5000);
+  forceExit.unref();
+  app.server.closeAllConnections?.();
+  void app.close().then(() => process.exit(0));
+};
+
+const { app } = buildApp({ dbFile: join(dataDir, 'atsusync.db'), onShutdown: shutdown });
 
 app
   .listen({ port: config.port, host: '127.0.0.1' })
@@ -13,4 +23,4 @@ app
     process.exit(1);
   });
 
-for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => void app.close().then(() => process.exit(0)));
+for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, shutdown);

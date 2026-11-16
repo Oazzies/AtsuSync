@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { AtsuSeriesState } from '@atsusync/shared';
+import type { AtsuSeriesInfo, AtsuSeriesState } from '@atsusync/shared';
 import { USER_AGENT, retryAfterMs, sleep } from '../polite.ts';
+
+export type { AtsuSeriesInfo };
 
 export const ATSU_BASE = 'https://atsu.moe';
 export const CONTENT_REQUESTS_FORUM_ID = 'cms0o0eh80000uj0lmpkut6tc';
@@ -28,11 +30,6 @@ export interface AtsuPost {
   createdAt: number;
   author?: { usernameDisplay?: string } | null;
   tags?: AtsuTag[];
-}
-
-export interface AtsuPostsPage {
-  posts: AtsuPost[];
-  hasMore: boolean;
 }
 
 export interface SeriesRef {
@@ -77,17 +74,6 @@ export interface AtsuSearchHit {
   /** "Comic" or "Novel". */
   medium: string | null;
   isAdult: boolean;
-}
-
-/** A series page on atsu.moe, from the public search index. */
-export interface AtsuSeriesInfo {
-  id: string;
-  title: string;
-  altTitles: string[];
-  synopsis: string;
-  cover: string | null;
-  chapterCount: number;
-  medium: string | null;
 }
 
 export class AtsuError extends Error {
@@ -147,11 +133,6 @@ export class AtsuClient {
 
   // ---- Forum ----
 
-  listPosts(page: number, sort: 'new' | 'hot' = 'new', forumId = CONTENT_REQUESTS_FORUM_ID) {
-    const q = new URLSearchParams({ forumId, sort, page: String(page) });
-    return this.json<AtsuPostsPage>(`/api/forum/posts?${q}`);
-  }
-
   async getPost(postId: string): Promise<AtsuPost | null> {
     const r = await this.json<{ post?: AtsuPost }>(`/api/forum/getPost?postId=${encodeURIComponent(postId)}`);
     return r.post ?? null;
@@ -203,11 +184,6 @@ export class AtsuClient {
       chapterCount: Number(d.chapterCount ?? 0),
       medium: d.medium ?? null,
     };
-  }
-
-  async listTags(forumId = CONTENT_REQUESTS_FORUM_ID) {
-    const r = await this.json<{ tags: AtsuTag[] }>(`/api/forum/tags?forumId=${encodeURIComponent(forumId)}`);
-    return r.tags;
   }
 
   // ---- Account ----

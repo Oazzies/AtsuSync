@@ -10,6 +10,8 @@ const defaults = (): Settings => ({
   atsuCookie: '',
   defaultCheckIntervalMin: 60,
   suwayomiUrl: '',
+  lncrawlUrl: '',
+  lnreaderEnabled: false,
 });
 
 export class SettingsStore {

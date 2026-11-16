@@ -17,6 +17,22 @@ export interface MangaBaka {
   status: string | null;
   totalChapters: number | null;
   url: string | null;
+  description?: string | null;
+  year?: number | null;
+  authors?: string[];
+  genres?: string[];
+  rating?: number | null;
+  contentRating?: string | null;
+}
+
+export interface AtsuSeriesInfo {
+  id: string;
+  title: string;
+  altTitles: string[];
+  synopsis: string;
+  cover: string | null;
+  chapterCount: number;
+  medium: string | null;
 }
 
 export interface TrackerLink {
@@ -93,9 +109,11 @@ export interface RequestComment {
 /**
  * Scanlation = the group's own site; aggregator = re-hosts other groups' or official releases; official = the
  * publisher's own platform; torrent = releases fetched through a BitTorrent swarm (Nyaa); download = direct-download file hosts;
- * suwayomi = Keiyoushi/Mihon APK extensions bridged through a running Suwayomi-Server instance.
+ * suwayomi = Keiyoushi / Yūzōnō / Mihon APK extensions bridged through a running Suwayomi-Server instance;
+ * lncrawl = lightnovel-crawler novel sources bridged through a local LNCrawl Python service;
+ * lnreader = LNReader JS novel plugins executed directly in Node.js.
  */
-export type SourceKind = 'scanlation' | 'aggregator' | 'official' | 'torrent' | 'download' | 'suwayomi';
+export type SourceKind = 'scanlation' | 'aggregator' | 'official' | 'torrent' | 'download' | 'suwayomi' | 'lncrawl' | 'lnreader';
 
 /** Comics are downloaded as page-image ZIPs, novels as one EPUB per chapter. */
 export type SourceMedium = 'comic' | 'novel';
@@ -109,6 +127,62 @@ export interface SourceInfo {
   enabled: boolean;
   /** False for sources that can only be linked by pasting a series URL. */
   searchable: boolean;
+  /** True for 18+ / NSFW sources. */
+  nsfw?: boolean;
+}
+
+export interface SourceSearchFilter {
+  keiyoushi: boolean;
+  lncrawl: boolean;
+  lnreader: boolean;
+  aggregators: boolean;
+  scanlations: boolean;
+  official: boolean;
+  nsfw: boolean;
+}
+
+export const DEFAULT_SOURCE_SEARCH_FILTER: SourceSearchFilter = {
+  keiyoushi: true,
+  lncrawl: true,
+  lnreader: true,
+  aggregators: true,
+  scanlations: true,
+  official: true,
+  nsfw: true,
+};
+
+export const SOURCE_FILTER_OPTIONS: { key: keyof SourceSearchFilter; label: string }[] = [
+  { key: 'keiyoushi', label: 'Keiyoushi / Yūzōnō' },
+  { key: 'lncrawl', label: 'LNCrawl' },
+  { key: 'lnreader', label: 'LNReader' },
+  { key: 'aggregators', label: 'Aggregators' },
+  { key: 'scanlations', label: 'Scanlations' },
+  { key: 'official', label: 'Official' },
+  { key: 'nsfw', label: 'NSFW' },
+];
+
+export function matchesSourceFilter(
+  source: { kind: SourceKind; nsfw?: boolean },
+  filter?: Partial<SourceSearchFilter>,
+): boolean {
+  const f: SourceSearchFilter = { ...DEFAULT_SOURCE_SEARCH_FILTER, ...filter };
+  if (source.nsfw && !f.nsfw) return false;
+  switch (source.kind) {
+    case 'suwayomi':
+      return f.keiyoushi;
+    case 'lncrawl':
+      return f.lncrawl;
+    case 'lnreader':
+      return f.lnreader;
+    case 'aggregator':
+      return f.aggregators;
+    case 'scanlation':
+      return f.scanlations;
+    case 'official':
+      return f.official;
+    default:
+      return f.keiyoushi || f.lncrawl || f.lnreader || f.aggregators || f.scanlations || f.official;
+  }
 }
 
 export interface SourceChapterAlt {
@@ -285,6 +359,8 @@ export interface Settings {
   atsuCookie: string;
   defaultCheckIntervalMin: number;
   suwayomiUrl: string;
+  lncrawlUrl: string;
+  lnreaderEnabled: boolean;
 }
 
 export interface SettingsView extends Omit<Settings, 'atsuCookie'> {
@@ -292,12 +368,41 @@ export interface SettingsView extends Omit<Settings, 'atsuCookie'> {
   atsuUser: string | null;
 }
 
+export interface NotificationSettings {
+  new_chapters: boolean;
+  chapters_unlocked: boolean;
+  downloads_complete: boolean;
+  discovery_done: boolean;
+}
+
+export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
+  new_chapters: true,
+  chapters_unlocked: true,
+  downloads_complete: true,
+  discovery_done: true,
+};
+
 export interface SuwayomiStatus {
   running: boolean;
   managed: boolean;
   url: string;
   jarPresent: boolean;
   pid: number | null;
+  lastError: string | null;
+}
+
+export interface LncrawlStatus {
+  running: boolean;
+  managed: boolean;
+  url: string;
+  installed: boolean;
+  pid: number | null;
+  lastError: string | null;
+}
+
+export interface LnreaderStatus {
+  enabled: boolean;
+  pluginCount: number;
   lastError: string | null;
 }
 
@@ -317,7 +422,6 @@ export type ServerEvent =
   | { type: 'new_chapters'; linkId: number; seriesTitle: string; labels: string[] }
   /** Chapters that were paid / early access and are now free to download. */
   | { type: 'chapters_unlocked'; linkId: number; seriesTitle: string; labels: string[] }
-  | { type: 'requests_synced'; added: number }
   | { type: 'discovery_start'; requestId: string; sources: { id: string; name: string }[] }
   | { type: 'discovery_progress'; requestId: string; sourceId: string; sourceName: string; matches: SourceMatch[]; error: string | null }
   | { type: 'discovery_done'; requestId: string; seriesTitle: string; matchCount: number };

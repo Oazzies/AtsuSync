@@ -359,6 +359,21 @@ describe('download pipeline', () => {
     const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
     expect(() => t.pipeline.enqueue([t.links.chapters(link.id)[1]!.id])).toThrow(/locked/);
   });
+
+  it('downloads chapters from multiple links concurrently without starving higher chapter numbers', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    t.chapters.current = [ch(1), ch(2), ch(100)];
+    const l1 = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart?a=1', checkIntervalMin: 60 });
+    const l2 = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart?a=2', checkIntervalMin: 60 });
+    const l3 = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart?a=3', checkIntervalMin: 60 });
+    const c1 = t.links.chapters(l1.id);
+    const c2 = t.links.chapters(l2.id);
+    const c3 = t.links.chapters(l3.id);
+    const jobs = t.pipeline.enqueue([c1[0]!.id, c1[1]!.id, c2[0]!.id, c3[2]!.id]);
+    const done = await waitForJobs(t.pipeline);
+    expect(done.every((j) => j.state === 'done')).toBe(true);
+  });
 });
 
 describe('discovery', () => {
@@ -371,6 +386,14 @@ describe('discovery', () => {
     await expect(t.discovery.addByUrl(req, 'https://fake.test/s/heart')).rejects.toThrow(/no chapters to upload/);
     t.chapters.current = [ch(1)];
     expect((await t.discovery.find(req)).map((m) => m.chapterCount)).toEqual([1]);
+  });
+
+  it('deduplicates concurrent find() calls for the same requestId', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const req = t.requests.get('REQ1')!;
+    const [a, b] = await Promise.all([t.discovery.find(req), t.discovery.find(req)]);
+    expect(a).toEqual(b);
   });
 });
 
@@ -394,6 +417,11 @@ describe('existing Atsumaru series', () => {
     t.pipeline.enqueue([t.links.chapters(link.id)[0]!.id]);
     const [job] = await waitForJobs(t.pipeline);
     expect(job!.uploadUrl).toBe('https://atsu.moe/upload?manga=YwMX0');
+
+    const delRes = await t.app.inject({ method: 'DELETE', url: '/api/requests/atsu:YwMX0' });
+    expect(delRes.statusCode).toBe(200);
+    expect(t.requests.get('atsu:YwMX0')).toBeNull();
+    expect(t.links.get(link.id)).toBeNull();
   });
 });
 
@@ -584,5 +612,57 @@ describe('tracked links', () => {
     const rankedNoMb = rankSourceMatches(matches, null);
     expect(rankedNoMb.at(-1)?.sourceId).toBe('s1');
     expect(rankedNoMb[0]?.sourceId).toBe('s4');
+  });
+
+  it('defers queued jobs for a prefix until un-deferred, then runs them', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
+    const [c1] = t.links.chapters(link.id);
+
+    t.pipeline.setDeferredPrefix('fake', true);
+    const [job] = t.pipeline.enqueue([c1!.id]);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(t.pipeline.get(job!.id)?.state).toBe('queued');
+
+    t.pipeline.setDeferredPrefix('fake', false);
+    await waitForJobs(t.pipeline);
+    expect(t.pipeline.get(job!.id)?.state).toBe('done');
+  });
+
+  it('fails fast when 6+ consecutive pages fail with zero valid pages', async () => {
+    const adapter: SourceAdapter = {
+      id: 'broken-pages',
+      name: 'BrokenPages',
+      baseUrl: 'https://broken.test',
+      kind: 'aggregator',
+      hosts: ['broken.test'],
+      rateLimit: { rpm: 600, concurrency: 6 },
+      async search() { return []; },
+      async getSeries() {
+        return {
+          title: 'Broken Series',
+          url: 'https://broken.test/s/1',
+          altTitles: [],
+          chapters: [{ number: 1, label: 'Chapter 1', url: 'https://broken.test/ch/1' }],
+        };
+      },
+      async getChapterPages() {
+        return Array.from({ length: 20 }, (_, i) => ({
+          url: `https://broken.test/img/bad-${i + 1}.png`,
+          name: `${String(i + 1).padStart(3, '0')}.png`,
+        }));
+      },
+    };
+    const t = setup({ extra: [adapter] });
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'broken-pages', seriesUrl: 'https://broken.test/s/1', checkIntervalMin: 60 });
+    const [c1] = t.links.chapters(link.id);
+
+    const [job] = t.pipeline.enqueue([c1!.id]);
+    await waitForJobs(t.pipeline);
+    const done = t.pipeline.get(job!.id)!;
+    expect(done.state).toBe('failed');
+    expect(done.progress).toBeLessThan(20);
   });
 });

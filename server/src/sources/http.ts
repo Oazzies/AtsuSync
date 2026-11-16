@@ -27,6 +27,10 @@ export interface FetchOptions {
   ignoreRobots?: boolean;
   /** Static asset (image) request: uses the host's asset limiter instead of the API one. */
   asset?: boolean;
+  /** Per-attempt request timeout in ms (0 disables). Defaults to 30s. */
+  timeoutMs?: number;
+  /** Optional cancellation signal. */
+  signal?: AbortSignal;
 }
 
 const DEFAULT_LIMIT = { rpm: 30, concurrency: 1 };
@@ -35,6 +39,7 @@ const ASSET_LIMIT = { rpm: 900, concurrency: 6 };
 const CACHE_MAX = 500;
 const ROBOTS_TTL = 24 * 60 * 60_000;
 const MAX_RETRY_WAIT = 5 * 60_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 export class SourceHttp {
   private limiters = new Map<string, HostLimiter>();
@@ -116,16 +121,24 @@ export class SourceHttp {
   }
 
   private async fetch(url: string, opts: FetchOptions, attempt = 0): Promise<Response> {
+    opts.signal?.throwIfAborted();
     if (!opts.ignoreRobots) await this.assertAllowed(url);
+    opts.signal?.throwIfAborted();
     const host = new URL(url).hostname;
     const release = await this.acquire(host, opts.asset);
     let res: Response;
     try {
+      opts.signal?.throwIfAborted();
+      const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const timeoutSignal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
+      const signal =
+        opts.signal && timeoutSignal ? AbortSignal.any([opts.signal, timeoutSignal]) : (opts.signal ?? timeoutSignal);
       res = await this.fetchImpl(url, {
         method: opts.method ?? 'GET',
         body: opts.body,
         headers: { 'user-agent': USER_AGENT, ...opts.headers },
         redirect: 'follow',
+        signal,
       });
     } finally {
       release();
@@ -137,13 +150,17 @@ export class SourceHttp {
         throw new BlockedError(`${host} shows a bot challenge to automated clients; AtsuSync won't try to get past it`);
       }
     }
-    if ((res.status === 429 || res.status === 503 || res.status >= 500) && attempt < 3) {
-      const wait = retryAfterMs(res) ?? 2000 * 2 ** attempt;
+    const isLocal = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+    const maxAttempts = isLocal && res.status >= 500 && res.status !== 503 ? 1 : 3;
+    if ((res.status === 429 || res.status === 503 || res.status >= 500) && attempt < maxAttempts) {
+      const wait = retryAfterMs(res) ?? (isLocal ? 500 : 2000 * 2 ** attempt);
       if (wait > MAX_RETRY_WAIT) throw new Error(`${host} asked us to wait ${Math.round(wait / 60_000)} min; try later`);
-      // Slow down for everyone talking to this host, not just this request.
-      const l = this.limiterFor(host, opts.asset);
-      l.nextAt = Math.max(l.nextAt, Date.now() + wait);
-      await sleep(wait);
+      if (res.status === 429 || res.status === 503) {
+        // Slow down for everyone talking to this host, not just this request.
+        const l = this.limiterFor(host, opts.asset);
+        l.nextAt = Math.max(l.nextAt, Date.now() + wait);
+      }
+      await sleepOrAbort(wait, opts.signal);
       return this.fetch(url, opts, attempt + 1);
     }
     if (!res.ok) throw new Error(`${opts.method ?? 'GET'} ${url} → ${res.status}`);
@@ -164,7 +181,11 @@ export class SourceHttp {
     const release = await this.acquire(host);
     let res: Response;
     try {
-      res = await this.fetchImpl(`${origin}/robots.txt`, { headers: { 'user-agent': USER_AGENT }, redirect: 'follow' });
+      res = await this.fetchImpl(`${origin}/robots.txt`, {
+        headers: { 'user-agent': USER_AGENT },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(10_000),
+      });
     } catch {
       return ALLOW_ALL; // unreachable robots.txt: nothing to obey; the real request will fail anyway
     } finally {
@@ -221,3 +242,22 @@ const newLimiter = (r: { rpm: number; concurrency: number }): HostLimiter => ({
   nextAt: 0,
   waiters: [],
 });
+
+async function sleepOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await sleep(ms);
+    return;
+  }
+  signal.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}

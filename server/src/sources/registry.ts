@@ -152,7 +152,16 @@ export class SourceRegistry {
 
   info(): SourceInfo[] {
     const enabled = new Set(this.enabled().map((a) => a.id));
-    return this.all().map((a) => ({ id: a.id, name: a.name, baseUrl: a.baseUrl, kind: a.kind, medium: mediumOf(a), enabled: enabled.has(a.id), searchable: !!a.search }));
+    return this.all().map((a) => ({
+      id: a.id,
+      name: a.name,
+      baseUrl: a.baseUrl,
+      kind: a.kind,
+      medium: mediumOf(a),
+      enabled: enabled.has(a.id),
+      searchable: !!a.search,
+      nsfw: !!a.nsfw,
+    }));
   }
 
   setEnabled(id: string, enabled: boolean) {

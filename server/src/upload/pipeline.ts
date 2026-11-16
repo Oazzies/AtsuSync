@@ -65,9 +65,13 @@ export class DownloadPipeline {
   private running = new Set<number>();
   private busyLinks = new Set<number>();
   private cancelled = new Set<number>();
+  private aborts = new Map<number, AbortController>();
+  private deferredPrefixes = new Set<string>();
   private closed = false;
   private lastProgress = new Map<number, number>();
   private totals = new Map<number, number>();
+  private linkLastRun = new Map<number, number>();
+  private scheduleSeq = 0;
 
   constructor(
     private db: Db,
@@ -295,35 +299,68 @@ export class DownloadPipeline {
     this.pump();
   }
 
+  /** Defer starting queued jobs whose sourceId starts with `prefix` (e.g. while Suwayomi starts up). */
+  setDeferredPrefix(prefix: string, deferred: boolean) {
+    if (deferred) {
+      this.deferredPrefixes.add(prefix);
+    } else {
+      this.deferredPrefixes.delete(prefix);
+      this.pump();
+    }
+  }
+
   cancel(id: number) {
     const job = this.get(id);
     if (!job || !ACTIVE.includes(job.state)) return;
-    if (this.running.has(id)) this.cancelled.add(id);
-    else this.finish(id, 'cancelled', 'Cancelled');
+    if (this.running.has(id)) {
+      this.cancelled.add(id);
+      this.aborts.get(id)?.abort();
+    } else {
+      this.finish(id, 'cancelled', 'Cancelled');
+    }
   }
 
-  /** Start queued jobs up to the concurrency limit. */
+  /** Start queued jobs up to the concurrency limit, scheduling fairly across links. */
   pump() {
     if (this.closed || this.running.size >= this.concurrency) return;
     const queued = this.db.prepare(`${JOB_SELECT} WHERE j.state = 'queued' ORDER BY c.number, j.id`).all() as unknown as JobRow[];
+    const candidates: JobRow[] = [];
+    const seenLinks = new Set<number>();
     for (const row of queued) {
+      if (this.busyLinks.has(row.link_id) || this.running.has(row.id) || seenLinks.has(row.link_id)) continue;
+      if (this.isDeferred(row.source_id)) continue;
+      seenLinks.add(row.link_id);
+      candidates.push(row);
+    }
+    candidates.sort((a, b) => (this.linkLastRun.get(a.link_id) ?? 0) - (this.linkLastRun.get(b.link_id) ?? 0));
+    for (const row of candidates) {
       if (this.running.size >= this.concurrency) break;
-      if (this.busyLinks.has(row.link_id) || this.running.has(row.id)) continue;
+      this.linkLastRun.set(row.link_id, ++this.scheduleSeq);
       this.running.add(row.id);
       this.busyLinks.add(row.link_id);
+      const ac = new AbortController();
+      this.aborts.set(row.id, ac);
       // run() only handles errors once its try block starts; a job whose setup throws (e.g. its source was
       // removed) must end up failed, or it stays queued and pump() re-runs it in an endless loop.
-      void this.run(row.id)
+      void this.run(row.id, ac.signal)
         .catch((err) => this.finish(row.id, 'failed', (err as Error).message))
         .finally(() => {
           this.running.delete(row.id);
           this.busyLinks.delete(row.link_id);
           this.cancelled.delete(row.id);
+          this.aborts.delete(row.id);
           this.lastProgress.delete(row.id);
           this.totals.delete(row.id);
           this.pump();
         });
     }
+  }
+
+  private isDeferred(sourceId: string): boolean {
+    for (const prefix of this.deferredPrefixes) {
+      if (sourceId.startsWith(prefix)) return true;
+    }
+    return false;
   }
 
   /** Write the chapter ZIP to `<dir>/<linkId>-<series>/<chapter>.zip`. */
@@ -354,7 +391,15 @@ export class DownloadPipeline {
   }
 
   /** Novel sources: fetch the chapter text (plus any inline images) and write it as an EPUB. */
-  private async runNovel(id: number, linkId: number, adapter: SourceAdapter, chapter: SourceChapter, seriesTitle: string, checkCancel: () => void) {
+  private async runNovel(
+    id: number,
+    linkId: number,
+    adapter: SourceAdapter,
+    chapter: SourceChapter,
+    seriesTitle: string,
+    checkCancel: () => void,
+    signal: AbortSignal,
+  ) {
     if (!adapter.getChapterText) throw new Error(`${adapter.name} cannot download novel chapters`);
     this.setState(id, 'downloading', `Fetching the text of ${chapter.label} from ${adapter.name}`);
     const text = await adapter.getChapterText(chapter, this.sources.http);
@@ -365,7 +410,7 @@ export class DownloadPipeline {
     for (const img of wanted) {
       checkCancel();
       try {
-        const { bytes, contentType } = await this.sources.http.bytes(img.url, { headers: img.headers });
+        const { bytes, contentType } = await this.sources.http.bytes(img.url, { headers: img.headers, signal });
         const mediaType = imageMediaType(bytes, contentType);
         if (!mediaType || !looksLikeImage(bytes)) {
           this.log(id, `Warning: Illustration ${img.url} is not a valid image (${bytes.length} bytes) — skipped`);
@@ -373,7 +418,7 @@ export class DownloadPipeline {
           images.push({ src: img.src, bytes, mediaType });
         }
       } catch (err) {
-        if (err instanceof CancelError || err instanceof BlockedError) throw err;
+        if (err instanceof CancelError || err instanceof BlockedError || this.cancelled.has(id)) throw err;
         this.log(id, `Warning: Illustration ${img.url} failed (${(err as Error).message}) — skipped`);
       }
       this.update(id, { progress: 1 + ++completed });
@@ -442,10 +487,11 @@ export class DownloadPipeline {
 
   async close() {
     this.closed = true;
+    for (const ac of this.aborts.values()) ac.abort();
     await this.torrents.destroy();
   }
 
-  private async run(id: number) {
+  private async run(id: number, signal: AbortSignal) {
     const job = this.get(id);
     if (!job) return;
     const chapter = this.links.chapter(job.chapterId);
@@ -454,9 +500,19 @@ export class DownloadPipeline {
     if (!chapter || !link || !sourceRow) return;
     // A chapter fetched from another site (see addFromSource) is resolved by its own URL's adapter.
     const pageUrl = sourceRow.source_url ?? chapter.url;
-    const adapter = this.sources.forUrl(pageUrl) ?? this.sources.get(link.sourceId);
+    let adapter = this.sources.forUrl(pageUrl);
+    if (!adapter) {
+      try {
+        adapter = this.sources.get(link.sourceId);
+      } catch {
+        if (link.sourceId.startsWith('suwayomi:')) {
+          throw new Error(`Suwayomi source ${link.sourceId} is not available (is Suwayomi-Server running?)`);
+        }
+        throw new Error(`Unknown source ${link.sourceId}`);
+      }
+    }
     const checkCancel = () => {
-      if (this.cancelled.has(id)) throw new CancelError();
+      if (this.cancelled.has(id) || signal.aborted) throw new CancelError();
     };
 
     try {
@@ -465,7 +521,7 @@ export class DownloadPipeline {
         return;
       }
       if (mediumOf(adapter) === 'novel') {
-        await this.runNovel(id, link.id, adapter, { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked }, link.seriesTitle, checkCancel);
+        await this.runNovel(id, link.id, adapter, { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked }, link.seriesTitle, checkCancel, signal);
         return;
       }
       this.setState(id, 'downloading', `Resolving pages for ${chapter.label} from ${adapter.name}`);
@@ -473,13 +529,18 @@ export class DownloadPipeline {
         { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked },
         this.sources.http,
       );
+      checkCancel();
+      if (pages.length === 0) throw new Error(`${adapter.name} returned 0 pages for ${chapter.label}`);
       this.update(id, { total: pages.length, progress: 0 });
+      this.log(id, `Downloading ${pages.length} page${pages.length === 1 ? '' : 's'}`);
 
       // Pages download in parallel (the per-host limiter still caps it); results keep page order.
       const rawFiles: (PageFile | undefined)[] = new Array(pages.length);
       let next = 0;
       let done = 0;
       let skipped = 0;
+      let succeeded = 0;
+      let consecutiveFailures = 0;
       let firstSkipReason: string | null = null;
       const worker = async () => {
         try {
@@ -488,24 +549,33 @@ export class DownloadPipeline {
             const i = next++;
             const p = pages[i]!;
             try {
-              const { bytes } = await this.sources.http.bytes(p.url, { headers: p.headers });
+              const { bytes } = await this.sources.http.bytes(p.url, { headers: p.headers, signal });
               // Tiny but valid images (blank pages) are fine; only reject error bodies and truncated files.
               if (bytes.length < 64 || !looksLikeImage(bytes)) {
                 const reason = `Page ${p.name} is not a valid image (${bytes.length} bytes)`;
                 skipped++;
+                consecutiveFailures++;
                 firstSkipReason ??= reason;
                 this.log(id, `Warning: ${reason} — skipped`);
               } else {
                 rawFiles[i] = { name: p.name, bytes };
+                succeeded++;
+                consecutiveFailures = 0;
               }
             } catch (err) {
-              if (err instanceof CancelError || err instanceof BlockedError) throw err;
+              if (err instanceof CancelError || err instanceof BlockedError || this.cancelled.has(id) || signal.aborted) {
+                throw err instanceof CancelError ? err : this.cancelled.has(id) || signal.aborted ? new CancelError() : err;
+              }
               const reason = `Page ${p.name} failed (${(err as Error).message})`;
               skipped++;
+              consecutiveFailures++;
               firstSkipReason ??= reason;
               this.log(id, `Warning: ${reason} — skipped`);
             }
             this.update(id, { progress: ++done });
+            if (consecutiveFailures >= 6 && succeeded === 0) {
+              throw new Error(firstSkipReason ?? `All attempted pages failed from ${adapter.name}`);
+            }
           }
         } catch (err) {
           next = pages.length; // stop the other workers picking up more pages
@@ -519,6 +589,7 @@ export class DownloadPipeline {
       if (files.length === 0) {
         throw new Error(firstSkipReason ?? `No valid images downloaded from ${adapter.name}`);
       }
+      this.log(id, `Bundling ${files.length} page${files.length === 1 ? '' : 's'} into ZIP`);
       const fixed = await mergeSliverPages(files);
       if (fixed.merged > 0) this.log(id, `Joined ${fixed.merged} thin leftover strip(s) onto the pages above them (${files.length} → ${fixed.files.length} pages)`);
       files = fixed.files;
@@ -527,7 +598,7 @@ export class DownloadPipeline {
       this.log(id, `Saved ${files.length} pages${skipped > 0 ? ` (${skipped} skipped)` : ''} (${(size / 1024 / 1024).toFixed(1)} MB) to ${path}`);
       this.finish(id, 'done', null);
     } catch (err) {
-      if (err instanceof CancelError) this.finish(id, 'cancelled', 'Cancelled');
+      if (err instanceof CancelError || this.cancelled.has(id)) this.finish(id, 'cancelled', 'Cancelled');
       else this.finish(id, 'failed', (err as Error).message);
     }
   }

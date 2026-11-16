@@ -104,6 +104,13 @@ export class LinksRepo {
     const series = await adapter.getSeries(input.seriesUrl, this.sources.http);
     const now = Date.now();
     const id = tx(this.db, () => {
+      const existing = this.db
+        .prepare('SELECT id FROM links WHERE request_id = ? AND source_id = ? AND series_url = ?')
+        .get(input.requestId, input.sourceId, series.url) as { id: number } | undefined;
+      if (existing) {
+        this.applySeries(existing.id, series, 'known');
+        return existing.id;
+      }
       const res = this.db
         .prepare(
           `INSERT INTO links (request_id, source_id, series_url, series_title, cover, atsu_manga_id, watch, check_interval_min,

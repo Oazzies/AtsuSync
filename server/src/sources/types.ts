@@ -39,6 +39,8 @@ export interface SourceAdapter {
   kind: SourceKind;
   /** Defaults to 'comic'. A 'novel' adapter implements getChapterText; its chapters download as EPUBs. */
   medium?: SourceMedium;
+  /** True for 18+ / NSFW sources (e.g. LewdManhwa, Suwayomi extensions with isNsfw). */
+  nsfw?: boolean;
   /** Hostnames this adapter owns; used for "paste a URL" and the rate limiter. */
   hosts: string[];
   /** Politeness budget, applied per host by SourceHttp. */

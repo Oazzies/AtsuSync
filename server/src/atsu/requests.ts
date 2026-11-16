@@ -1,7 +1,6 @@
 import type { AtsuPresence, ContentRequest, RequestStatus, RequestTag, TrackerLink } from '@atsusync/shared';
 import type { Db } from '../db/client.ts';
-import { tx } from '../db/client.ts';
-import { ATSU_BASE, CONTENT_REQUESTS_PATH, type AtsuClient, type AtsuPost, type AtsuSeriesInfo } from './client.ts';
+import { ATSU_BASE, CONTENT_REQUESTS_PATH, type AtsuPost, type AtsuSeriesInfo } from './client.ts';
 
 const STATUS_BY_TAG: Record<string, RequestStatus> = {
   added: 'added',
@@ -259,42 +258,4 @@ export class RequestsRepo {
   has(id: string) {
     return !!this.db.prepare('SELECT 1 FROM requests WHERE id = ?').get(id);
   }
-}
-
-/** Posts that are forum housekeeping rather than requests. */
-const isRequestPost = (p: AtsuPost) => !p.pinned && !p.removed;
-
-/**
- * Pull the forum newest-first. A quick sync stops after a full page of posts we already
- * had; a full sync walks every page (picks up status-tag changes on older posts).
- */
-export async function syncRequests(
-  client: AtsuClient,
-  repo: RequestsRepo,
-  db: Db,
-  opts: { full?: boolean; maxPages?: number; pageDelayMs?: number } = {},
-) {
-  const maxPages = opts.maxPages ?? (opts.full ? 200 : 10);
-  let added = 0;
-  let updated = 0;
-  for (let page = 0; page < maxPages; page++) {
-    const res = await client.listPosts(page, 'new');
-    let knownOnPage = 0;
-    const requestPosts = res.posts.filter(isRequestPost);
-    tx(db, () => {
-      for (const p of res.posts) {
-        if (!isRequestPost(p)) {
-          if (p.removed) repo.remove(p.id);
-          continue;
-        }
-        if (repo.has(p.id)) knownOnPage++;
-        if (repo.upsertPost(p) === 'inserted') added++;
-        else updated++;
-      }
-    });
-    if (!res.hasMore) break;
-    if (!opts.full && requestPosts.length > 0 && knownOnPage === requestPosts.length) break;
-    await new Promise((r) => setTimeout(r, opts.pageDelayMs ?? 400));
-  }
-  return { added, updated };
 }

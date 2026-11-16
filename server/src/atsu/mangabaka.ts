@@ -117,6 +117,8 @@ export function parseMangaBaka(data: any): MangaBakaSeries | null {
   add(data.native_title);
   const id = Number(data.id);
   const canonical = typeof data.canonical_url === 'string' && data.canonical_url ? data.canonical_url : null;
+  const strList = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && !!x.trim()).map((x) => x.trim()) : [];
   return {
     id,
     title: data.title ?? [...titles][0] ?? '',
@@ -126,5 +128,11 @@ export function parseMangaBaka(data: any): MangaBakaSeries | null {
     status: typeof data.status === 'string' && data.status ? data.status : null,
     totalChapters: parseTotalChapters(data.total_chapters),
     url: canonical ?? (Number.isFinite(id) && id > 0 ? `https://mangabaka.org/${id}` : null),
+    description: typeof data.description === 'string' && data.description.trim() ? data.description.trim() : null,
+    year: typeof data.year === 'number' && Number.isFinite(data.year) ? data.year : null,
+    authors: strList(data.authors),
+    genres: strList(data.genres),
+    rating: typeof data.rating === 'number' && Number.isFinite(data.rating) ? data.rating : null,
+    contentRating: typeof data.content_rating === 'string' && data.content_rating.trim() ? data.content_rating.trim() : null,
   };
 }

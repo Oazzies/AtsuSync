@@ -1,9 +1,9 @@
 import { dirname, join } from 'node:path';
 import { createReadStream } from 'node:fs';
-import Fastify from 'fastify';
-import type { ContentRequest, RequestComment, Settings, SettingsView } from '@atsusync/shared';
+import Fastify, { LogController } from 'fastify';
+import type { ContentRequest, RequestComment, Settings, SettingsView, SourceSearchFilter } from '@atsusync/shared';
 import { AtsuClient, emptySeriesState } from './atsu/client.ts';
-import { RequestsRepo, syncRequests } from './atsu/requests.ts';
+import { RequestsRepo } from './atsu/requests.ts';
 import { checkMangaBakaForRequest, getMangaBakaSeries } from './atsu/mangabaka.ts';
 import { PresenceChecker, toRequestComment } from './atsu/presence.ts';
 import { openDb, type Db } from './db/client.ts';
@@ -14,13 +14,38 @@ import { Discovery } from './sources/discovery.ts';
 import { mediumOf } from './sources/types.ts';
 import { SourceRegistry } from './sources/registry.ts';
 import { SourceHttp } from './sources/http.ts';
-import { SUWAYOMI_PREFIX, SuwayomiClient, createSuwayomiAdapter, isAtsumaruExtension, isAtsumaruSource, isEnglishLang } from './sources/suwayomi.ts';
+import {
+  LNREADER_PREFIX,
+  createLnreaderAdapter,
+  dedupeLnreaderSources,
+  type LnreaderPluginMeta,
+} from './sources/lnreader.ts';
+import { LnreaderManager } from './sources/lnreaderManager.ts';
+import {
+  LNCRAWL_PREFIX,
+  LncrawlClient,
+  createLncrawlAdapter,
+  dedupeLncrawlSources,
+  isEnglishLncrawlLang,
+} from './sources/lncrawl.ts';
+import { LncrawlManager } from './sources/lncrawlManager.ts';
+import {
+  SUWAYOMI_PREFIX,
+  SuwayomiClient,
+  createSuwayomiAdapter,
+  dedupeExtensions,
+  dedupeSuwayomiSources,
+  isAtsumaruExtension,
+  isAtsumaruSource,
+  isEnglishLang,
+} from './sources/suwayomi.ts';
 import { SuwayomiManager } from './sources/suwayomiManager.ts';
 import type { SourceAdapter } from './sources/types.ts';
 import { Drafts, mimeFor } from './upload/drafts.ts';
 import type { TorrentClient } from './sources/torrent.ts';
 import { DownloadPipeline } from './upload/pipeline.ts';
 import { Watcher } from './watcher/watcher.ts';
+import { createPrettyStream, fmt, formatDuration, formatStatus } from './logger.ts';
 
 export interface AppOptions {
   dbFile: string;
@@ -31,6 +56,8 @@ export interface AppOptions {
   adapters?: SourceAdapter[];
   fetchImpl?: typeof fetch;
   background?: boolean;
+  logger?: boolean;
+  onShutdown?: () => void;
 }
 
 export function buildApp(opts: AppOptions) {
@@ -53,22 +80,72 @@ export function buildApp(opts: AppOptions) {
     } catch {
       throw Object.assign(new Error('Invalid Suwayomi-Server URL'), { statusCode: 400 });
     }
-    const nodes = (await suwayomi.listSources())
-      .filter((n) => isEnglishLang(n.lang) && !isAtsumaruSource(n))
-      .sort((a, b) => Number(a.isNsfw) - Number(b.isNsfw) || (a.displayName || a.name).localeCompare(b.displayName || b.name));
+    const nodes = dedupeSuwayomiSources(
+      (await suwayomi.listSources()).filter((n) => isEnglishLang(n.lang) && !isAtsumaruSource(n)),
+    ).sort((a, b) => Number(a.isNsfw) - Number(b.isNsfw) || (a.displayName || a.name).localeCompare(b.displayName || b.name));
     const adapters = nodes.map((n) => createSuwayomiAdapter(n, suwayomi));
     sources.replaceDynamic(SUWAYOMI_PREFIX, adapters);
     return adapters.length;
   };
+  const lncrawl = new LncrawlClient(() => settings.get().lncrawlUrl, opts.fetchImpl);
+  const lncrawlManager = new LncrawlManager(dirname(opts.dbFile), settings, lncrawl);
+  const syncLncrawl = async () => {
+    const base = lncrawl.baseUrl();
+    if (!base) {
+      sources.replaceDynamic(LNCRAWL_PREFIX, []);
+      return 0;
+    }
+    try {
+      new URL(base);
+    } catch {
+      throw Object.assign(new Error('Invalid LNCrawl bridge URL'), { statusCode: 400 });
+    }
+    const nodes = dedupeLncrawlSources(
+      (await lncrawl.listSources()).filter((n) => isEnglishLncrawlLang(n.language)),
+      sources.all(),
+    ).sort((a, b) => a.domain.localeCompare(b.domain));
+    const adapters = nodes.map((n) => createLncrawlAdapter(n, lncrawl));
+    sources.replaceDynamic(LNCRAWL_PREFIX, adapters);
+    if (settings.get().lnreaderEnabled) {
+      applyLnreaderCatalog(lnreaderManager.loadCachedCatalog());
+    }
+    return adapters.length;
+  };
+  const lnreaderManager = new LnreaderManager(dirname(opts.dbFile), settings, opts.fetchImpl);
+  const applyLnreaderCatalog = (entries: LnreaderPluginMeta[]) => {
+    const deduped = dedupeLnreaderSources(entries, sources.all()).sort((a, b) => a.name.localeCompare(b.name));
+    const adapters = deduped.map((meta) => createLnreaderAdapter(meta, () => lnreaderManager.getPlugin(meta)));
+    sources.replaceDynamic(LNREADER_PREFIX, adapters);
+    lnreaderManager.setCatalogCount(adapters.length);
+    return adapters.length;
+  };
+  const syncLnreader = async () => {
+    const entries = await lnreaderManager.syncCatalog();
+    return applyLnreaderCatalog(entries);
+  };
   const discovery = new Discovery(db, sources);
   const links = new LinksRepo(db, sources);
   const downloadsDir = opts.downloadsDir ?? join(dirname(opts.dbFile), 'downloads');
-  const pipeline = new DownloadPipeline(db, links, sources, downloadsDir, 2, opts.torrents);
+  const pipeline = new DownloadPipeline(db, links, sources, downloadsDir, 6, opts.torrents);
   const drafts = new Drafts(join(downloadsDir, '.drafts'));
   const watcher = new Watcher(links, sources, atsu, 60_000, (ids) => pipeline.clearForChapters(ids));
   const presence = new PresenceChecker(atsu, requests);
 
-  const app = Fastify({ logger: { level: 'info', transport: undefined } });
+  const enableLogger = opts.logger ?? !process.env.VITEST;
+  const app = Fastify({
+    logController: new LogController({ disableRequestLogging: true }),
+    logger: enableLogger ? { level: 'info', stream: createPrettyStream() } : false,
+  });
+
+  if (enableLogger) {
+    app.addHook('onResponse', (req, reply, done) => {
+      const method = fmt.bold(req.method.padEnd(6));
+      const status = formatStatus(reply.statusCode);
+      const time = fmt.dim(formatDuration(reply.elapsedTime));
+      app.log.info(`${method} ${req.url} ${fmt.dim('->')} ${status} ${time}`);
+      done();
+    });
+  }
 
   // Images for hand-built chapters arrive as raw bodies, one request per file.
   const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
@@ -96,23 +173,23 @@ export function buildApp(opts: AppOptions) {
     if (!settings.get().suwayomiUrl.trim()) {
       sources.replaceDynamic(SUWAYOMI_PREFIX, []);
     }
+    if (!settings.get().lncrawlUrl.trim()) {
+      sources.replaceDynamic(LNCRAWL_PREFIX, []);
+    }
+    if (!settings.get().lnreaderEnabled) {
+      sources.replaceDynamic(LNREADER_PREFIX, []);
+      lnreaderManager.setCatalogCount(0);
+    }
     return settingsView();
   });
 
+  app.post('/api/server/stop', async (_req, reply) => {
+    reply.send({ ok: true });
+    setTimeout(() => opts.onShutdown?.(), 50);
+  });
+
   // ---- Requests ----
-  let syncing: Promise<unknown> | null = null;
-  const runSync = (full: boolean) => {
-    syncing ??= syncRequests(atsu, requests, db, { full })
-      .then((r) => {
-        events.emitEvent({ type: 'requests_synced', added: r.added });
-        void presence.tick();
-        return r;
-      })
-      .finally(() => (syncing = null));
-    return syncing;
-  };
   app.get('/api/requests', async () => requests.list());
-  app.post<{ Querystring: { full?: string } }>('/api/requests/sync', async (req) => runSync(req.query.full === '1'));
   // Series that already exist on Atsumaru (https://atsu.moe/manga/<id>) can be tracked and extended without a content request.
   app.post<{ Body: { url: string } }>('/api/series', async (req) => {
     const input = (req.body?.url ?? '').trim();
@@ -127,8 +204,12 @@ export function buildApp(opts: AppOptions) {
     const post = req.params.id.startsWith('atsu:') || req.params.id.startsWith('mb:') ? null : await atsu.getPost(req.params.id).catch(() => null);
     if (post?.id && post.createdAt) requests.upsertPost(post);
     const r = (req.params.id.startsWith('atsu:') ? requests.findByMangaId(req.params.id.slice(5)) : null) ?? mustRequest(req.params.id);
-    const mangabaka = r.mangabakaId ? await getMangaBakaSeries(r.mangabakaId).catch(() => null) : null;
-    return { request: r, mangabaka, matches: discovery.cached(r.id, mangabaka?.totalChapters ?? null), links: links.list({ requestId: r.id }) };
+    const atsuId = r.atsuMangaId ?? r.presence?.match?.mangaId ?? null;
+    const [mangabaka, atsuSeries] = await Promise.all([
+      r.mangabakaId ? getMangaBakaSeries(r.mangabakaId).catch(() => null) : Promise.resolve(null),
+      atsuId ? atsu.getSeriesInfo(atsuId).catch(() => null) : Promise.resolve(null),
+    ]);
+    return { request: r, mangabaka, atsuSeries, matches: discovery.cached(r.id, mangabaka?.totalChapters ?? null), links: links.list({ requestId: r.id }) };
   });
   app.patch<{ Params: { id: string }; Body: { title?: string | null } }>('/api/requests/:id', async (req) => {
     const r = mustRequest(req.params.id);
@@ -136,6 +217,14 @@ export function buildApp(opts: AppOptions) {
       requests.setCustomTitle(r.id, req.body.title ?? null);
     }
     return mustRequest(r.id);
+  });
+  app.delete<{ Params: { id: string } }>('/api/requests/:id', async (req) => {
+    const r = (req.params.id.startsWith('atsu:') ? requests.findByMangaId(req.params.id.slice(5)) : null) ?? mustRequest(req.params.id);
+    for (const l of links.list({ requestId: r.id })) {
+      pipeline.clear(l.id);
+    }
+    requests.remove(r.id);
+    return { ok: true };
   });
   app.post<{ Body: { sourceId?: string | null; mangaId?: string | null; mangaBakaId?: string | null; title?: string | null } }>('/api/uploads/resolve', async (req) => {
     const sourceId = req.body?.sourceId?.trim() || null;
@@ -171,12 +260,17 @@ export function buildApp(opts: AppOptions) {
     }
 
     if (!r) {
-      return { request: null, mangabaka: null, matches: [], links: [], resolved: { mangaId, mangaBakaId, title } };
+      return { request: null, mangabaka: null, atsuSeries: null, matches: [], links: [], resolved: { mangaId, mangaBakaId, title } };
     }
-    const mangabaka = r.mangabakaId ? await getMangaBakaSeries(r.mangabakaId).catch(() => null) : null;
+    const atsuId = r.atsuMangaId ?? r.presence?.match?.mangaId ?? null;
+    const [mangabaka, atsuSeries] = await Promise.all([
+      r.mangabakaId ? getMangaBakaSeries(r.mangabakaId).catch(() => null) : Promise.resolve(null),
+      atsuId ? atsu.getSeriesInfo(atsuId).catch(() => null) : Promise.resolve(null),
+    ]);
     return {
       request: r,
       mangabaka,
+      atsuSeries,
       matches: discovery.cached(r.id, mangabaka?.totalChapters ?? null),
       links: links.list({ requestId: r.id }),
       resolved: { mangaId: mangaId ?? r.atsuMangaId, mangaBakaId: mangaBakaId ?? r.mangabakaId, title: r.title },
@@ -200,7 +294,14 @@ export function buildApp(opts: AppOptions) {
     if (!mangaId && !r.mangabakaId) return { ...emptySeriesState(), error: 'No MangaBaka link on this request' };
     return atsu.getSeriesState(mangaId ? { mangaId } : { mangaBakaId: r.mangabakaId });
   });
-  app.post<{ Params: { id: string } }>('/api/requests/:id/find-sources', async (req) => discovery.find(mustRequest(req.params.id)));
+  app.post<{ Params: { id: string }; Body?: { filter?: Partial<SourceSearchFilter> } }>(
+    '/api/requests/:id/find-sources',
+    async (req) => discovery.find(mustRequest(req.params.id), req.body?.filter),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/requests/:id/stop-find-sources',
+    async (req) => ({ stopped: discovery.stop(req.params.id) }),
+  );
   app.post<{ Params: { id: string } }>('/api/requests/:id/mangabaka', async (req) => {
     const r = mustRequest(req.params.id);
     const result = await checkMangaBakaForRequest(r, { force: true });
@@ -233,9 +334,9 @@ export function buildApp(opts: AppOptions) {
     return suwayomiManager.status();
   });
   app.get('/api/sources/suwayomi/extensions', async () => ({
-    extensions: (await suwayomi.fetchExtensions())
-      .filter((e) => isEnglishLang(e.lang) && !isAtsumaruExtension(e))
-      .sort((a, b) => Number(a.isNsfw) - Number(b.isNsfw) || a.name.localeCompare(b.name)),
+    extensions: dedupeExtensions(
+      (await suwayomi.fetchExtensions()).filter((e) => isEnglishLang(e.lang) && !isAtsumaruExtension(e)),
+    ).sort((a, b) => Number(a.isNsfw) - Number(b.isNsfw) || a.name.localeCompare(b.name)),
   }));
   app.post<{ Params: { pkgName: string } }>('/api/sources/suwayomi/extensions/:pkgName/install', async (req) => {
     await suwayomi.setExtensionInstalled(req.params.pkgName, true);
@@ -246,6 +347,38 @@ export function buildApp(opts: AppOptions) {
     await suwayomi.setExtensionInstalled(req.params.pkgName, false);
     const count = await syncSuwayomi();
     return { count, sources: sources.info() };
+  });
+
+  app.get('/api/sources/lncrawl/status', async () => lncrawlManager.status());
+  app.post('/api/sources/lncrawl/setup', async () => {
+    const status = await lncrawlManager.setupAndStart();
+    const count = await syncLncrawl();
+    return { status, count, sources: sources.info() };
+  });
+  app.post('/api/sources/lncrawl/sync', async () => {
+    const count = await syncLncrawl();
+    return { count, sources: sources.info() };
+  });
+  app.post('/api/sources/lncrawl/stop', async () => {
+    await lncrawlManager.stop();
+    return lncrawlManager.status();
+  });
+
+  app.get('/api/sources/lnreader/status', async () => lnreaderManager.status());
+  app.post('/api/sources/lnreader/sync', async () => {
+    const count = await syncLnreader();
+    return { status: lnreaderManager.status(), count, sources: sources.info() };
+  });
+  app.post('/api/sources/lnreader/disable', async () => {
+    const status = lnreaderManager.disable();
+    sources.replaceDynamic(LNREADER_PREFIX, []);
+    return { status, sources: sources.info() };
+  });
+  app.get<{ Querystring: { url?: string } }>('/api/sources/suwayomi/thumbnail', async (req, reply) => {
+    const rawUrl = req.query.url?.trim();
+    if (!rawUrl) return reply.code(400).send({ error: 'Missing url query parameter' });
+    const { buffer, contentType } = await suwayomi.fetchThumbnail(rawUrl);
+    return reply.header('content-type', contentType).header('cache-control', 'private, max-age=86400').send(buffer);
   });
   app.put<{ Params: { id: string }; Body: { enabled: boolean } }>('/api/sources/:id', async (req) => {
     sources.setEnabled(req.params.id, !!req.body.enabled);
@@ -503,30 +636,56 @@ export function buildApp(opts: AppOptions) {
     });
   });
 
-  let syncTimer: NodeJS.Timeout | null = null;
+  let suwayomiUpdateTimer: NodeJS.Timeout | null = null;
+  const runSuwayomiAutoUpdate = async () => {
+    if (!settings.get().suwayomiUrl.trim()) return;
+    const updated = await suwayomiManager.updateInstalledExtensions();
+    if (updated > 0) {
+      app.log.info(`Updated ${updated} Suwayomi extension(s)`);
+      await syncSuwayomi();
+    }
+  };
   app.addHook('onReady', async () => {
     if (opts.background === false) return;
     watcher.start();
     presence.start();
-    pipeline.pump();
     if (settings.get().suwayomiUrl.trim()) {
+      pipeline.setDeferredPrefix(SUWAYOMI_PREFIX, true);
       void suwayomiManager
         .startIfInstalled()
         .then(() => syncSuwayomi())
+        .finally(() => pipeline.setDeferredPrefix(SUWAYOMI_PREFIX, false))
+        .then(() => runSuwayomiAutoUpdate())
         .catch((e) => app.log.warn(`Suwayomi sync failed: ${(e as Error).message}`));
     }
-    void runSync(true).catch((e) => app.log.warn(`Request sync failed: ${e.message}`));
-    // A quick sync only sees new posts; status tags (Added, Duplicate…) change on old ones, which
-    // is what removes a post's upload button, so walk the whole forum (~15 pages) every few hours.
-    let ticks = 0;
-    syncTimer = setInterval(() => void runSync(++ticks % 12 === 0).catch(() => {}), 15 * 60_000);
+    if (settings.get().lncrawlUrl.trim()) {
+      pipeline.setDeferredPrefix(LNCRAWL_PREFIX, true);
+      void lncrawlManager
+        .startIfInstalled()
+        .then(() => syncLncrawl())
+        .finally(() => pipeline.setDeferredPrefix(LNCRAWL_PREFIX, false))
+        .catch((e) => app.log.warn(`LNCrawl sync failed: ${(e as Error).message}`));
+    }
+    if (settings.get().lnreaderEnabled) {
+      const cached = lnreaderManager.loadCachedCatalog();
+      if (cached.length) {
+        applyLnreaderCatalog(cached);
+      } else {
+        void syncLnreader().catch((e) => app.log.warn(`LNReader sync failed: ${(e as Error).message}`));
+      }
+    }
+    pipeline.pump();
+    suwayomiUpdateTimer = setInterval(() => {
+      void runSuwayomiAutoUpdate().catch((e) => app.log.warn(`Suwayomi extension update failed: ${(e as Error).message}`));
+    }, 60 * 60_000);
   });
   app.addHook('onClose', async () => {
     watcher.stop();
     presence.stop();
     await pipeline.close();
     await suwayomiManager.stop();
-    if (syncTimer) clearInterval(syncTimer);
+    await lncrawlManager.stop();
+    if (suwayomiUpdateTimer) clearInterval(suwayomiUpdateTimer);
     db.close();
   });
 
