@@ -111,6 +111,7 @@ jobs:
 
       - name: Package release archive
         run: |
+          chmod +x setup.sh setup.command scripts/*.sh
           ARCHIVE="atsusync-${TAG_NAME}.zip"
           zip -r "$ARCHIVE" . \
             -x ".git/*" \

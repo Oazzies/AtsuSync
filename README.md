@@ -18,12 +18,13 @@ Local helper + browser extension for uploading to Atsumaru [content requests](ht
 1. Download the latest `atsusync-v*.zip` from [GitHub Releases](https://github.com/Oazzies/AtsuSync/releases/latest) and extract it to a permanent folder (Chrome loads the extension directly from inside this folder).
 2. Run the setup (no Git required):
    - **Windows**: double-click **`setup.cmd`**
-   - **macOS / Linux**: run **`./setup.sh`**
+   - **macOS**: double-click **`setup.command`** *(if macOS blocks an unsigned file, Right-click → Open)*
+   - **Linux**: double-click **`setup.sh`** and choose **Run in Terminal** *(or run `./setup.sh`)*
 3. Load the extension in your browser:
    1. Open `chrome://extensions` (or `edge://extensions` / `brave://extensions`)
    2. Enable **Developer mode**
    3. Click **Load unpacked** and select the `extension/dist` folder inside your AtsuSync folder
-4. Open `https://atsu.moe`, open the AtsuSync side panel, and click **Start Server** (on macOS, run `./scripts/start-server.sh`). Your `atsu.moe` session is synced automatically.
+4. Open `https://atsu.moe`, open the AtsuSync side panel, and click **Start Server**. Your `atsu.moe` session is synced automatically.
 
 ## How to Use
 

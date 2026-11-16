@@ -118,6 +118,14 @@ export class Updater {
           timeout: 15_000,
         }).catch(() => {});
       }
+    } else if (process.platform === 'darwin' || process.platform === 'linux') {
+      const shScript = join(this.repoRoot, 'scripts', 'register-protocol.sh');
+      if (existsSync(shScript)) {
+        await execFileAsync('bash', [shScript], {
+          cwd: this.repoRoot,
+          timeout: 15_000,
+        }).catch(() => {});
+      }
     }
   }
 
