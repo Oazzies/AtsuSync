@@ -1,19 +1,43 @@
 import type { SourceInfo } from '@atsusync/shared';
 import type { Db } from '../db/client.ts';
 import { arenascan } from './adapters/arenascan.ts';
+import { danke } from './adapters/danke.ts';
+import { dynasty } from './adapters/dynasty.ts';
 import { lewdmanhwa } from './adapters/lewdmanhwa.ts';
+import { mangacherri } from './adapters/mangacherri.ts';
 import { mangadex } from './adapters/mangadex.ts';
 import { kingofshojo } from './adapters/kingofshojo.ts';
 import { mgeko } from './adapters/mgeko.ts';
 import { mangafreak } from './adapters/mangafreak.ts';
 import { mangapill } from './adapters/mangapill.ts';
+import { mangaread } from './adapters/mangaread.ts';
 import { nuviatoon } from './adapters/nuviatoon.ts';
+import { readmanga } from './adapters/readmanga.ts';
+import { webcomics } from './adapters/webcomics.ts';
 import { webtoon } from './adapters/webtoon.ts';
+import { weebcentral } from './adapters/weebcentral.ts';
 import { SourceHttp } from './http.ts';
 import { matchesUrl, mediumOf, type SourceAdapter } from './types.ts';
 
 // Register new source sites here.
-const ADAPTERS: SourceAdapter[] = [nuviatoon, mangadex, mgeko, kingofshojo, webtoon, mangapill, lewdmanhwa, mangafreak, arenascan];
+const ADAPTERS: SourceAdapter[] = [
+  nuviatoon,
+  mangadex,
+  mgeko,
+  kingofshojo,
+  webtoon,
+  mangapill,
+  lewdmanhwa,
+  mangafreak,
+  arenascan,
+  weebcentral,
+  dynasty,
+  mangacherri,
+  danke,
+  readmanga,
+  mangaread,
+  webcomics,
+];
 
 export class SourceRegistry {
   readonly http: SourceHttp;
