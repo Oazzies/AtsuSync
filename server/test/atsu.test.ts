@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AtsuClient, parseSeriesState, type AtsuPostsPage } from '../src/atsu/client.ts';
-import { parseMangaBaka } from '../src/atsu/mangabaka.ts';
+import { checkMangaBakaForRequest, parseMangaBaka, searchMangaBakaSeries } from '../src/atsu/mangabaka.ts';
 import { RequestsRepo, isUploadable, parseTrackers, statusFromTags, syncRequests, uploadMangaBakaId } from '../src/atsu/requests.ts';
 import { openDb } from '../src/db/client.ts';
 import { bestScore, searchQueries } from '../src/sources/match.ts';
@@ -33,15 +33,69 @@ describe('content request parsing', () => {
     expect(statusFromTags([{ name: 'Added' }])).toBe('added');
   });
 
-  it('parses MangaBaka alt titles', () => {
+  it('parses MangaBaka alt titles, chapter count, status, and url', () => {
     const mb = parseMangaBaka({
       id: 36039,
       title: 'The Sound of Your Voice',
       native_title: '목소리를 들려주세요',
       romanized_title: 'Moksorireul Deullyeojuseyo',
       secondary_titles: { unknown: [{ title: '恋上你的声音' }] },
+      type: 'manhwa',
+      status: 'completed',
+      total_chapters: '125',
+      canonical_url: 'https://mangabaka.org/manhwa/36039/The-Sound-of-Your-Voice',
     })!;
     expect(mb.titles).toEqual(['The Sound of Your Voice', 'Moksorireul Deullyeojuseyo', '목소리를 들려주세요', '恋上你的声音']);
+    expect(mb.totalChapters).toBe(125);
+    expect(mb.status).toBe('completed');
+    expect(mb.type).toBe('manhwa');
+    expect(mb.url).toBe('https://mangabaka.org/manhwa/36039/The-Sound-of-Your-Voice');
+  });
+
+  it('filters MangaBaka search results by comic vs novel medium', async () => {
+    const fakeFetch = (async () =>
+      new Response(
+        JSON.stringify({
+          data: [
+            { id: 85266, title: 'Solo Leveling', type: 'novel', status: 'completed', total_chapters: '270' },
+            { id: 3397, title: 'Solo Leveling', type: 'manhwa', status: 'completed', total_chapters: '201' },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof fetch;
+
+    const comic = await searchMangaBakaSeries(['Solo Leveling'], 'comic', fakeFetch);
+    expect(comic?.id).toBe(3397);
+    expect(comic?.totalChapters).toBe(201);
+
+    const novel = await searchMangaBakaSeries(['Solo Leveling'], 'novel', fakeFetch);
+    expect(novel?.id).toBe(85266);
+    expect(novel?.totalChapters).toBe(270);
+  });
+
+  it('detects medium mismatch on checkMangaBakaForRequest and falls back to matching medium', async () => {
+    const fakeFetch = (async (url: string) => {
+      if (url.includes('/series/85266')) {
+        return new Response(
+          JSON.stringify({ data: { id: 85266, title: 'Solo Leveling', type: 'novel', status: 'completed', total_chapters: '270' } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          data: [{ id: 3397, title: 'Solo Leveling', type: 'manhwa', status: 'completed', total_chapters: '201' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const res = await checkMangaBakaForRequest(
+      { mangabakaId: '85266', title: 'Solo Leveling', altTitles: [], tags: [] },
+      { force: true, fetchImpl: fakeFetch },
+    );
+    expect(res.mediumMismatch).toBe(false);
+    expect(res.mangabaka?.id).toBe(3397);
+    expect(res.mangabaka?.totalChapters).toBe(201);
   });
 });
 

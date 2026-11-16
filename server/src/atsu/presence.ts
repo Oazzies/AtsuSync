@@ -13,10 +13,13 @@ const CLAIM_WORDS =
   /\b(added|uploaded|uploading|i'?ll upload|will upload|on it|already (?:on|in) atsu|working on (?:it|this)|done (?:uploading|adding))\b/i;
 
 /** A Novel request should only match a novel on Atsu, and comic requests never a novel. */
+export function wantsNovel(req: Pick<ContentRequest, 'tags' | 'title'>): boolean {
+  return req.tags.some((t) => t.name.toLowerCase() === 'novel') || /\(novel\)|light novel|web ?novel/i.test(req.title);
+}
+
 export function sameMedium(req: ContentRequest, medium: string | null): boolean {
   if (!medium) return true;
-  const wantsNovel = req.tags.some((t) => t.name.toLowerCase() === 'novel') || /\(novel\)|light novel|web ?novel/i.test(req.title);
-  return wantsNovel === (medium.toLowerCase() === 'novel');
+  return wantsNovel(req) === (medium.toLowerCase() === 'novel');
 }
 
 export function isClaim(content: string): boolean {

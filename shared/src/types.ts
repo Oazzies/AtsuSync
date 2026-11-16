@@ -8,6 +8,17 @@ export interface RequestTag {
   emoji: string | null;
 }
 
+export interface MangaBaka {
+  id: number;
+  title: string;
+  titles: string[];
+  cover: string | null;
+  type: string | null;
+  status: string | null;
+  totalChapters: number | null;
+  url: string | null;
+}
+
 export interface TrackerLink {
   kind: 'mangabaka' | 'anilist' | 'mal' | 'other';
   url: string;

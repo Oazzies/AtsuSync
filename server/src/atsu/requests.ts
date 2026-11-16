@@ -130,7 +130,7 @@ export class RequestsRepo {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, tags_json = excluded.tags_json,
            status = excluded.status, kind = excluded.kind, trackers_json = excluded.trackers_json,
-           mangabaka_id = excluded.mangabaka_id, comment_count = excluded.comment_count, score = excluded.score,
+           mangabaka_id = COALESCE(excluded.mangabaka_id, requests.mangabaka_id), comment_count = excluded.comment_count, score = excluded.score,
            synced_at = excluded.synced_at, section_id = COALESCE(excluded.section_id, requests.section_id)`,
       )
       .run(
@@ -155,16 +155,21 @@ export class RequestsRepo {
   /** Track a series that is already on Atsumaru; it is stored like a request so sources, links and downloads work the same. */
   upsertAtsuSeries(s: AtsuSeriesInfo): ContentRequest {
     const id = atsuSeriesRequestId(s.id);
+    const tags = s.medium?.toLowerCase() === 'novel' ? [{ id: 'novel', name: 'Novel', emoji: null }] : [];
     this.db
       .prepare(
         `INSERT INTO requests (id, title, content, author_name, tags_json, status, kind, trackers_json, mangabaka_id,
            comment_count, score, created_at, synced_at, atsu_manga_id, alt_titles_json, cover)
-         VALUES (?, ?, ?, NULL, '[]', 'added', NULL, '[]', NULL, 0, 0, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, synced_at = excluded.synced_at,
-           alt_titles_json = excluded.alt_titles_json, cover = excluded.cover`,
+         VALUES (?, ?, ?, NULL, ?, 'added', NULL, '[]', NULL, 0, 0, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, tags_json = excluded.tags_json,
+           synced_at = excluded.synced_at, alt_titles_json = excluded.alt_titles_json, cover = excluded.cover`,
       )
-      .run(id, s.title, s.synopsis, Date.now(), Date.now(), s.id, JSON.stringify(s.altTitles), s.cover);
+      .run(id, s.title, s.synopsis, JSON.stringify(tags), Date.now(), Date.now(), s.id, JSON.stringify(s.altTitles), s.cover);
     return this.get(id)!;
+  }
+
+  setMangaBakaId(id: string, mangabakaId: string) {
+    this.db.prepare('UPDATE requests SET mangabaka_id = ? WHERE id = ?').run(mangabakaId, id);
   }
 
   sectionId(id: string): string | null {
