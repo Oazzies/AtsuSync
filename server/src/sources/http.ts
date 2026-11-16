@@ -18,6 +18,8 @@ interface HostLimiter {
 }
 
 export interface FetchOptions {
+  method?: string;
+  body?: string;
   headers?: Record<string, string>;
   /** Cache the response body for this many ms (text/json only). */
   cacheMs?: number;
@@ -48,16 +50,26 @@ export class SourceHttp {
   }
 
   async text(url: string, opts: FetchOptions = {}): Promise<string> {
-    const cached = this.cache.get(url);
+    const key = opts.method && opts.method !== 'GET' ? `${opts.method}:${url}:${opts.body ?? ''}` : url;
+    const cached = this.cache.get(key);
     if (cached && Date.now() - cached.at < cached.ttl) return cached.body;
     const res = await this.fetch(url, opts);
     const body = await res.text();
-    if (opts.cacheMs) this.cache.set(url, { at: Date.now(), ttl: opts.cacheMs, body });
+    if (opts.cacheMs) this.cache.set(key, { at: Date.now(), ttl: opts.cacheMs, body });
     return body;
   }
 
   async json<T>(url: string, opts: FetchOptions = {}): Promise<T> {
     return JSON.parse(await this.text(url, { ...opts, headers: { accept: 'application/json', ...opts.headers } })) as T;
+  }
+
+  async postJson<T>(url: string, body: unknown, opts: FetchOptions = {}): Promise<T> {
+    return this.json<T>(url, {
+      ...opts,
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: { 'content-type': 'application/json', ...opts.headers },
+    });
   }
 
   /** Page images: static files, so they get a faster, parallel limiter than API/HTML requests. */
@@ -87,7 +99,12 @@ export class SourceHttp {
     const release = await this.acquire(host, opts.asset);
     let res: Response;
     try {
-      res = await this.fetchImpl(url, { headers: { 'user-agent': USER_AGENT, ...opts.headers }, redirect: 'follow' });
+      res = await this.fetchImpl(url, {
+        method: opts.method ?? 'GET',
+        body: opts.body,
+        headers: { 'user-agent': USER_AGENT, ...opts.headers },
+        redirect: 'follow',
+      });
     } finally {
       release();
     }
@@ -107,7 +124,7 @@ export class SourceHttp {
       await sleep(wait);
       return this.fetch(url, opts, attempt + 1);
     }
-    if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+    if (!res.ok) throw new Error(`${opts.method ?? 'GET'} ${url} → ${res.status}`);
     return res;
   }
 

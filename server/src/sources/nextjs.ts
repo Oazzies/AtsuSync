@@ -36,7 +36,7 @@ export function extractJsonAfterKey<T>(payload: string, key: string, from = 0): 
   return null;
 }
 
-function matchBracket(s: string, start: number): number {
+export function matchBracket(s: string, start: number): number {
   let depth = 0;
   let inStr = false;
   for (let i = start; i < s.length; i++) {
