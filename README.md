@@ -15,7 +15,7 @@ Local helper + browser extension for uploading to Atsumaru [content requests](ht
 
 ## Install
 
-1. On GitHub, click **Code → Download ZIP** and extract the folder.
+1. Download the latest `atsusync-v*.zip` from [GitHub Releases](https://github.com/Oazzies/AtsuSync/releases/latest) and extract the folder.
 2. Run the setup:
    - **Windows**: double-click **`setup.cmd`**
    - **macOS / Linux**: run **`setup.sh`**
@@ -39,4 +39,4 @@ Built-in sites and **LNReader** (novels) work out of the box. **Suwayomi** (Keiy
 
 ## Updating
 
-When an update is available, open the AtsuSync side panel → **Settings → Updates** and click **Download ZIP**, extract it into your AtsuSync folder (your `data/` folder with your settings and downloads stays intact), run **`setup.cmd`** (`setup.sh` on macOS/Linux), then click the reload icon (↻) on AtsuSync in `chrome://extensions` and restart the server.
+When an update is available, open the AtsuSync side panel → **Settings → Updates** and click **Update & Restart**. AtsuSync will download the latest release, update your files (keeping your `data/` folder and `.env` intact), restart the local server, and reload the extension automatically.

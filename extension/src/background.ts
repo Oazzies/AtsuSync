@@ -324,5 +324,10 @@ chrome.runtime.onMessage.addListener((msg: BgRequest, sender, sendResponse) => {
     sendResponse({ ok: true, data: winId !== undefined && sidePanelPorts.has(winId) });
     return false;
   }
+  if (msg.type === 'reloadExtension') {
+    sendResponse({ ok: true, data: null });
+    setTimeout(() => chrome.runtime.reload(), 100);
+    return false;
+  }
   return false;
 });

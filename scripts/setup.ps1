@@ -38,23 +38,18 @@ if (-not $nodeVer -or $nodeVer -lt $minNode) {
 }
 Write-Host "[OK] Node.js v$nodeVer" -ForegroundColor Green
 
-# 2. Check Git (optional, enables 1-click updates)
-if (Get-Command git -ErrorAction SilentlyContinue) {
-  Write-Host '[OK] Git found' -ForegroundColor Green
-} else {
-  Write-Host '[WARN] Git not found - in-app 1-click updates will be unavailable (you can still update via ZIP).' -ForegroundColor Yellow
-}
-
-# 3. Install dependencies & build extension
+# 2. Install dependencies & build extension (if not pre-built from a release)
 Write-Host ''
 Write-Host 'Installing dependencies...' -ForegroundColor Cyan
 & npm install
 if ($LASTEXITCODE -ne 0) { throw 'npm install failed' }
 
-Write-Host ''
-Write-Host 'Building browser extension...' -ForegroundColor Cyan
-& npm run build
-if ($LASTEXITCODE -ne 0) { throw 'npm run build failed' }
+if (-not (Test-Path (Join-Path $repoRoot 'extension\dist\manifest.json'))) {
+  Write-Host ''
+  Write-Host 'Building browser extension...' -ForegroundColor Cyan
+  & npm run build
+  if ($LASTEXITCODE -ne 0) { throw 'npm run build failed' }
+}
 
 # 4. Register atsusync:// protocol handler
 Write-Host ''

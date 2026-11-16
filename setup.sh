@@ -22,19 +22,15 @@ if [ "$NODE_MAJOR" -lt 22 ] || { [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt
 fi
 echo "[OK] Node.js v$NODE_VER"
 
-if command -v git >/dev/null 2>&1; then
-  echo "[OK] Git found"
-else
-  echo "[WARN] Git not found - in-app 1-click updates will be unavailable."
-fi
-
 echo ""
 echo "Installing dependencies..."
 npm install
 
-echo ""
-echo "Building browser extension..."
-npm run build
+if [ ! -f "extension/dist/manifest.json" ]; then
+  echo ""
+  echo "Building browser extension..."
+  npm run build
+fi
 
 chmod +x scripts/start-server.sh scripts/register-protocol.sh scripts/update.sh
 if [ "$(uname -s)" = "Linux" ]; then

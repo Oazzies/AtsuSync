@@ -600,6 +600,20 @@ async function checkUpdates(refresh = true) {
   }
 }
 
+async function waitForServerBackOnline(timeoutMs = 15_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  await new Promise((r) => setTimeout(r, 800));
+  while (Date.now() < deadline) {
+    try {
+      await api.settings();
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  return false;
+}
+
 async function applyUpdateNow() {
   if (applyingUpdate.value) return;
   applyingUpdate.value = true;
@@ -609,6 +623,16 @@ async function applyUpdateNow() {
     const res = await api.applyUpdate();
     updateMessage.value = res.message;
     if (res.updated) {
+      if (res.needsRestart) {
+        updateMessage.value = 'Restarting server…';
+        await api.restartServer().catch(() => null);
+        await waitForServerBackOnline();
+      }
+      if (res.needsReload) {
+        updateMessage.value = 'Reloading extension…';
+        await api.reloadExtension().catch(() => chrome.runtime.reload());
+        return;
+      }
       updateStatus.value = await api.checkUpdate(true).catch(() => updateStatus.value);
     }
   } catch (e) {
@@ -995,12 +1019,12 @@ async function syncCookie() {
                 <template v-if="updateStatus">
                   v{{ updateStatus.currentVersion }}<template v-if="updateStatus.currentCommit"> ({{ updateStatus.currentCommit }})</template>
                   <template v-if="updateStatus.updateAvailable">
-                    — Update available<template v-if="updateStatus.latestCommit"> ({{ updateStatus.latestCommit }})</template>
+                    — <template v-if="updateStatus.latestVersion">v{{ updateStatus.latestVersion }} available</template><template v-else>Update available</template>
                   </template>
                   <template v-else-if="updateStatus.error"> — {{ updateStatus.error }}</template>
                   <template v-else> — Up to date</template>
                 </template>
-                <template v-else>Check GitHub for new releases</template>
+                <template v-else>Check GitHub Releases for updates</template>
               </div>
             </div>
             <div class="sp-row" style="gap: 6px">
@@ -1014,7 +1038,7 @@ async function syncCookie() {
                 @click="applyUpdateNow"
               >
                 <Icon name="download" :class="{ 'sp-spin': applyingUpdate }" />
-                {{ applyingUpdate ? 'Updating…' : 'Update' }}
+                {{ applyingUpdate ? 'Updating…' : 'Update & Restart' }}
               </button>
               <a
                 v-else-if="updateStatus?.updateAvailable"
@@ -1029,7 +1053,13 @@ async function syncCookie() {
             </div>
           </div>
           <div v-if="updateStatus?.updateAvailable && updateStatus.latestMessage" class="sp-muted" style="font-size: 11px; margin-top: 6px">
-            Latest: {{ updateStatus.latestMessage }}
+            <a
+              v-if="updateStatus.releaseUrl"
+              :href="updateStatus.releaseUrl"
+              target="_blank"
+              rel="noopener"
+              style="color: inherit; text-decoration: underline"
+            >v{{ updateStatus.latestVersion }}</a><template v-else>Latest</template>: {{ updateStatus.latestMessage }}
           </div>
           <div v-if="updateMessage" class="sp-muted" style="font-size: 11px; margin-top: 6px; color: var(--sp-accent, #7dd3fc)">
             {{ updateMessage }}

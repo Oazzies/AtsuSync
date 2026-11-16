@@ -59,6 +59,7 @@ export interface AppOptions {
   background?: boolean;
   logger?: boolean;
   onShutdown?: () => void;
+  onRestart?: () => void;
 }
 
 export function buildApp(opts: AppOptions) {
@@ -194,6 +195,11 @@ export function buildApp(opts: AppOptions) {
   app.post('/api/server/stop', async (_req, reply) => {
     reply.send({ ok: true });
     setTimeout(() => opts.onShutdown?.(), 50);
+  });
+
+  app.post('/api/server/restart', async (_req, reply) => {
+    reply.send({ ok: true });
+    setTimeout(() => opts.onRestart?.(), 50);
   });
 
   // ---- Requests ----

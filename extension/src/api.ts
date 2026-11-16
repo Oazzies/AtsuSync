@@ -28,7 +28,8 @@ export type BgRequest =
   | { type: 'fetchCover'; url: string }
   | { type: 'syncCookies' }
   | { type: 'toggleSidePanel' }
-  | { type: 'getSidePanelState' };
+  | { type: 'getSidePanelState' }
+  | { type: 'reloadExtension' };
 
 export type BgResponse<T = unknown> =
   | { ok: true; data: T }
@@ -201,6 +202,9 @@ export const api = {
   saveSettings: (patch: Partial<Settings>) => call<SettingsView>('PUT', '/settings', patch),
   checkUpdate: (refresh = false) => call<UpdateStatus>('GET', `/server/update${refresh ? '?refresh=1' : ''}`),
   applyUpdate: () => call<UpdateApplyResult>('POST', '/server/update'),
+  restartServer: () => call<{ ok: boolean }>('POST', '/server/restart'),
+  reloadExtension: () =>
+    chrome.runtime.sendMessage({ type: 'reloadExtension' } satisfies BgRequest) as Promise<BgResponse<null>>,
   stopServer: () => call<{ ok: boolean }>('POST', '/server/stop'),
 
   requests: () => call<ContentRequest[]>('GET', '/requests'),

@@ -432,6 +432,8 @@ export interface UpdateStatus {
   latestVersion: string | null;
   latestCommit: string | null;
   latestMessage: string | null;
+  releaseUrl?: string | null;
+  releaseNotes?: string | null;
   updateAvailable: boolean;
   canAutoUpdate: boolean;
   repoUrl: string;
@@ -444,6 +446,8 @@ export interface UpdateApplyResult {
   ok: boolean;
   updated: boolean;
   needsReload: boolean;
+  needsRestart?: boolean;
+  version?: string;
   message: string;
   downloadUrl?: string;
 }
