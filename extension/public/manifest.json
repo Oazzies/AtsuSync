@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AtsuSync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "In-page AtsuSync helper for atsu.moe: find sources, link series, download chapter ZIPs, and attach them on upload.",
   "icons": {
     "48": "icons/icon-72.png",
@@ -9,7 +9,12 @@
     "120": "icons/icon-120.png",
     "180": "icons/icon-180.png"
   },
-  "permissions": ["cookies", "sidePanel", "notifications", "storage"],
+  "permissions": [
+    "cookies",
+    "sidePanel",
+    "notifications",
+    "storage"
+  ],
   "host_permissions": [
     "https://atsu.moe/*",
     "http://127.0.0.1:4517/*",
@@ -32,15 +37,23 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://atsu.moe/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://atsu.moe/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["icons/*.png"],
-      "matches": ["https://atsu.moe/*"]
+      "resources": [
+        "icons/*.png"
+      ],
+      "matches": [
+        "https://atsu.moe/*"
+      ]
     }
   ]
 }
