@@ -195,32 +195,6 @@ function setNativeInputValue(el: HTMLInputElement | HTMLTextAreaElement, value: 
   el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
-export function replaceAllPublishedTitles(
-  find: string,
-  replace: string,
-  opts: ReplaceOptions,
-  doc: Document = document,
-): { updatedInputs: number; totalOccurrences: number; totalInputs: number } {
-  const inputs = findPublishedTitleInputs(doc);
-  let updatedInputs = 0;
-  let totalOccurrences = 0;
-
-  for (const input of inputs) {
-    const res = applyTextReplace(input.value, find, replace, opts);
-    if (res.changed) {
-      setNativeInputValue(input, res.next);
-      updatedInputs++;
-      totalOccurrences += res.count;
-    }
-  }
-
-  return {
-    updatedInputs,
-    totalOccurrences,
-    totalInputs: inputs.length,
-  };
-}
-
 export interface TitleSnapshotEntry {
   el: HTMLInputElement | HTMLTextAreaElement;
   value: string;
@@ -258,10 +232,6 @@ const MINOR_TITLE_WORDS = new Set([
   'with',
   'yet',
 ]);
-
-export function captureTitleSnapshot(doc: Document = document): TitleSnapshotEntry[] {
-  return findPublishedTitleInputs(doc).map((el) => ({ el, value: el.value }));
-}
 
 export function restoreTitleSnapshot(snapshot: TitleSnapshotEntry[]): number {
   let restored = 0;

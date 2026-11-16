@@ -1,5 +1,10 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Settings } from '@atsusync/shared';
 import type { Db } from './db/client.ts';
+
+const envFile = resolve(import.meta.dirname, '../../.env');
+if (existsSync(envFile)) process.loadEnvFile(envFile);
 
 export const config = {
   port: Number(process.env.PORT ?? 4517),

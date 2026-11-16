@@ -96,6 +96,3 @@ export function chapterNumberFrom(...texts: string[]): number | null {
   }
   return null;
 }
-
-/** The chapter title without a leading "Chapter N:" so the EPUB shows one clean heading. */
-export const stripChapterPrefix = (title: string) => title.replace(/^\s*(?:chapter|chap\.?|ch\.?)\s*#?\d+(?:\.\d+)?\s*[:.\-–—]?\s*/i, '').trim();

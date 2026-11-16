@@ -101,15 +101,6 @@ export function parsePages(json: { data?: { pages?: NuviaPage[] } }, referer: st
   });
 }
 
-function resolveNextImage(src: string | undefined): string | undefined {
-  if (!src) return undefined;
-  if (src.startsWith('/_next/image')) {
-    const inner = new URL(src, BASE).searchParams.get('url');
-    return inner ? new URL(inner, BASE).href : undefined;
-  }
-  return new URL(src, BASE).href;
-}
-
 export const nuviatoon: SourceAdapter = {
   id: 'nuviatoon',
   name: 'Nuviatoon',

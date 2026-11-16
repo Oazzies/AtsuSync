@@ -1,5 +1,4 @@
 import * as cheerio from 'cheerio';
-import type { SourceHttp } from '../http.ts';
 import type { PageRef, SourceAdapter, SourceChapter, SourceSeries, SourceSeriesHit } from '../types.ts';
 
 // WebComics (webcomicsapp.com). Series live at /en/<genre>/<slug>/<book_id> (or /en/comic/<slug>/<book_id>)

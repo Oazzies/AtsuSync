@@ -370,7 +370,7 @@ describe('download pipeline', () => {
     const c1 = t.links.chapters(l1.id);
     const c2 = t.links.chapters(l2.id);
     const c3 = t.links.chapters(l3.id);
-    const jobs = t.pipeline.enqueue([c1[0]!.id, c1[1]!.id, c2[0]!.id, c3[2]!.id]);
+    t.pipeline.enqueue([c1[0]!.id, c1[1]!.id, c2[0]!.id, c3[2]!.id]);
     const done = await waitForJobs(t.pipeline);
     expect(done.every((j) => j.state === 'done')).toBe(true);
   });

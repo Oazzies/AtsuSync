@@ -5,7 +5,6 @@ import { USER_AGENT, retryAfterMs, sleep } from '../polite.ts';
 export type { AtsuSeriesInfo };
 
 export const ATSU_BASE = 'https://atsu.moe';
-export const CONTENT_REQUESTS_FORUM_ID = 'cms0o0eh80000uj0lmpkut6tc';
 export const CONTENT_REQUESTS_PATH = '/social/forum/cms0o0eh80000uj0lmpkut6tc/content-requests';
 
 export interface AtsuTag {
