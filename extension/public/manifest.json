@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "AtsuSync",
   "version": "0.1.0",
+  "author": "Oazzies",
   "description": "In-page AtsuSync helper for atsu.moe: find sources, link series, download chapter ZIPs, and attach them on upload.",
   "icons": {
     "48": "icons/icon-72.png",

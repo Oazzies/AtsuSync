@@ -1,6 +1,7 @@
 {
   "name": "atsusync",
   "version": "0.1.0",
+  "author": "Oazzies",
   "private": true,
   "type": "module",
   "engines": {

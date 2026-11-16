@@ -15,6 +15,7 @@ if [ "$OS_NAME" = "Linux" ]; then
   cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Name=AtsuSync Server
+Comment=AtsuSync by Oazzies
 Exec=x-terminal-emulator -e "$START_SCRIPT"
 Type=Application
 Terminal=false
@@ -57,6 +58,10 @@ if [ "$OS_NAME" = "Darwin" ]; then
   PLIST="$APP_PATH/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Delete :CFBundleIdentifier" "$PLIST" >/dev/null 2>&1 || true
   /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string moe.atsu.atsusync" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Delete :CFBundleGetInfoString" "$PLIST" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :CFBundleGetInfoString string 'AtsuSync by Oazzies'" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Delete :NSHumanReadableCopyright" "$PLIST" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :NSHumanReadableCopyright string 'Oazzies'" "$PLIST"
   /usr/libexec/PlistBuddy -c "Delete :CFBundleURLTypes" "$PLIST" >/dev/null 2>&1 || true
   /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes array" "$PLIST"
   /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0 dict" "$PLIST"
