@@ -374,6 +374,37 @@ describe('download pipeline', () => {
     const done = await waitForJobs(t.pipeline);
     expect(done.every((j) => j.state === 'done')).toBe(true);
   });
+
+  it('overlaps multiple chapters from the same link concurrently instead of strictly serializing them', async () => {
+    let activeResolves = 0;
+    let maxActiveResolves = 0;
+    const pch = (n: number): SourceChapter => ({ number: n, label: `Chapter ${n}`, url: `https://parallel.test/s/heart/${n}`, locked: false });
+    const parallel: SourceAdapter = {
+      ...fakeAdapter({ current: [pch(1), pch(2), pch(3)] }),
+      id: 'parallel',
+      hosts: ['parallel.test'],
+      rateLimit: { rpm: 6000, concurrency: 4 },
+      getSeries: async (url) => ({ title: 'Heart Aching', url, altTitles: [], chapters: [pch(1), pch(2), pch(3)] }),
+      getChapterPages: async (c) => {
+        activeResolves++;
+        maxActiveResolves = Math.max(maxActiveResolves, activeResolves);
+        await new Promise((r) => setTimeout(r, 40));
+        activeResolves--;
+        return [
+          { url: `https://fake.test/img/${c.number}/1.webp`, name: '001.webp' },
+          { url: `https://fake.test/img/${c.number}/2.webp`, name: '002.webp' },
+        ];
+      },
+    };
+    const t = setup({ extra: [parallel] });
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'parallel', seriesUrl: 'https://parallel.test/s/heart', checkIntervalMin: 60 });
+    const chapters = t.links.chapters(link.id);
+    t.pipeline.enqueue(chapters.map((c) => c.id));
+    const done = await waitForJobs(t.pipeline);
+    expect(done.every((j) => j.state === 'done')).toBe(true);
+    expect(maxActiveResolves).toBeGreaterThan(1);
+  });
 });
 
 describe('discovery', () => {
@@ -402,7 +433,7 @@ describe('existing Atsumaru series', () => {
     const t = setup();
     close = () => t.app.close();
     const doc = { id: 'YwMX0', title: 'Heart Aching', otherNames: ['Alt Name'], synopsis: 'x', posterMedium: '/static/p.avif', chapterCount: 1 };
-    const origFetch = (t.atsu as any).fetchImpl as ReturnType<typeof vi.fn>;
+    const origFetch = (t.atsu as any).fetchImpl as typeof fetch;
     (t.atsu as any).fetchImpl = async (input: string | URL, init?: RequestInit) =>
       String(input).includes('/collections/manga/documents/search')
         ? new Response(JSON.stringify({ hits: String(input).includes('YwMX0') ? [{ document: doc }] : [] }))
