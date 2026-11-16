@@ -27,7 +27,8 @@ Settings → paste your atsu.moe `cookie` request header (DevTools → Network �
 shared/src/types.ts                 DTOs shared by server and UI
 server/src/atsu/                    Atsumaru API client, request sync, MangaBaka lookups
 server/src/sources/                 Source system: adapter interface, rate-limited HTTP, matching, registry
-server/src/sources/adapters/        One file per site (nuviatoon.ts, _template.ts)
+server/src/sources/adapters/        One file per site (nuviatoon.ts, _template.ts); nyaa.ts is the torrent source
+server/src/sources/torrent.ts       Built-in BitTorrent client; torrentpack.ts turns torrent files into pages/ebooks
 server/src/links.ts                 Request ↔ source links and their chapters
 server/src/watcher/watcher.ts       New-chapter detection
 server/src/upload/pipeline.ts       Download queue (resolve pages → download → ZIP in data/downloads/<series>/)
@@ -46,11 +47,21 @@ web/src/views/                      Vue pages
 
 Atsumaru accepts novels as `.epub`, `.pdf`, `.docx`, `.txt` or `.md` on its upload page. Adapters with `medium: 'novel'` implement `getChapterText` instead of `getChapterPages`; the download pipeline fetches the chapter text (and any illustrations), sanitizes it to XHTML paragraphs, and writes `data/downloads/<series>/<chapter>.epub`. Upload it with **Add archive** on atsu.moe/upload like any chapter file.
 
-Novel requests (tagged *Novel*, or with "(Novel)" / "light novel" in the title) only search novel sources, and comic requests never search them. Current novel sources: Wuxiaworld (official; paid/Karma chapters fail at download with a "locked" message), NovelCool, Wuxiaworld.site, Hiraeth Translation, KnoxT. Sites from [everythingmoe](https://everythingmoe.com/section/novel) that were checked and skipped: those behind a Cloudflare challenge (FreeWebNovel, Royal Road, ScribbleHub, NovelFull, Foxaholic, Novelhall), ones whose robots.txt forbids novel pages (NovelPing, WoopRead), and ones whose chapter lists or text only load through client-side APIs or redirects (NovelFire, NovelBuddy, lightnovel.to, MVLEMPYR, Wuxia Dreams, ScrollersPub), NovelDex, NovelsTime, Chikari Novel, Full Novels). Requiem Translations and J-Novel Club need a login to read, 9Kafe is an ebook-download site, and the remaining list entries are machine-translation sites, so none of those were added.
+Novel requests (tagged *Novel*, or with "(Novel)" / "light novel" in the title) only search novel sources, and comic requests never search them. Current novel sources: Wuxiaworld (official; paid/Karma chapters fail at download with a "locked" message), NovelCool, Wuxiaworld.site, Hiraeth Translation, KnoxT, Pen & Paper Translations. Sites from [everythingmoe](https://everythingmoe.com/section/novel) that were checked and skipped: those behind a Cloudflare challenge (FreeWebNovel, Royal Road, ScribbleHub, NovelFull, Foxaholic, Novelhall), ones whose robots.txt forbids novel pages (NovelPing, WoopRead), and ones whose chapter lists or text only load through client-side APIs or redirects (NovelFire, NovelBuddy, lightnovel.to, MVLEMPYR, Wuxia Dreams, ScrollersPub), NovelDex, NovelsTime, Chikari Novel, Full Novels). Requiem Translations and J-Novel Club need a login to read, 9Kafe is an ebook-download site, and the remaining list entries are machine-translation sites, so none of those were added.
 
 ## Source kinds
 
-Each adapter sets `kind`: `scanlation` (the group's own site) or `aggregator` (re-hosts releases, e.g. official Webtoon chapters). The UI groups and filters by kind.
+Each adapter sets `kind`: `scanlation` (the group's own site), `aggregator` (re-hosts releases, e.g. official Webtoon chapters), `official`, `torrent` or `download`. The UI groups and filters by kind.
+
+## Torrent / download sources
+
+Sites from [everythingmoe's Download section](https://everythingmoe.com/section/download) that carry manga, manhwa, manhua or novels can be sources too. A download-type adapter implements `fetchChapter(chapter, ctx)` instead of `getChapterPages`: it fetches whole files and returns page images (repacked into the usual numbered ZIP) or a ready-made ebook (saved as-is, e.g. `.epub`). Everything else (Find sources, Link, Tracked, bulk Download, Mark uploaded, the extension's auto-attach) works exactly as for a site.
+
+- **Nyaa** (`nyaa` for comics, `nyaa-novel` for novels): searches the *Literature - English-translated* category through its RSS feed. Release titles (`One Piece 1197`, `Series c001-050`, `Series v01-03 (Digital)`) are parsed into series + chapter/volume numbers; a pack of many chapters becomes one chapter per number, several uploads of one chapter become the best-seeded one plus alternatives. Comics list per-chapter releases only (a series that only has volume torrents shows "only volume releases"); novels use volumes as chapters. Robots.txt blocks `/download`, so `.torrent` files are never fetched: the built-in WebTorrent client (`server/src/sources/torrent.ts`) joins the swarm from the info hash with Nyaa's trackers, downloads only the files for the chosen chapter, and deletes them once the ZIP/EPUB is written. It is leech-only (uploads capped to 1 KB/s, nothing seeded). CBZ/ZIP, loose images, and epub/pdf/docx/txt/md are handled; CBR/RAR/7z are reported as unsupported. Downloads wait for peers (up to 90 s) and fail clearly when a release has no seeders. Progress is shown as a percentage.
+- Checked on the list and skipped: the other torrent indexes (AnimeTosho, TsukiHime, SubsPlease, nekoBT, SeaDex, AniRena, Sneedex, AcgnX, ACG.RIP, Bangumi.moe, Shana Project, DKB, Beatrice-Raws, ToonsHub, Nipponsei) are anime/music, and Tokyo Toshokan mirrors Nyaa's listings. MangaZip is a parked domain, Panda Backup is a placeholder page, and the raw (untranslated) DDL sites (DLRaw, DL-Raw, DL-Zip, Book Share ZIP, Asia Media Blog, JPFiles, AnimeRss) only carry Japanese raws behind ad/captcha walls. The rest are anime, USENET, XDCC or physical-goods shops.
+
+To add another torrent source, return `https://<site>/view/<id>#ih=<infohash>&ch=<n>`-style chapter URLs (see `parseChapterUrl` in `nyaa.ts`) and call `ctx.torrents.download(...)` from `fetchChapter`, then `buildChapter(files)`.
+
 
 ## "Probably done" detection
 

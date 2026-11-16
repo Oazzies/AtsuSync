@@ -2,7 +2,7 @@
   "name": "atsusync",
   "private": true,
   "type": "module",
-  "workspaces": ["shared", "server", "web", "extension"],
+  "workspaces": ["shared", "server", "extension"],
   "scripts": {
     "dev": "concurrently -n server,ext -c blue,green \"npm run dev -w server\" \"npm run dev -w extension\"",
     "build": "npm run build -w extension",
