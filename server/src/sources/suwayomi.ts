@@ -196,6 +196,115 @@ export function isAtsumaruExtension(ext: Pick<SuwayomiExtension, 'pkgName' | 'na
   return /(?:^|\.)atsumaru(?:$|\.)/i.test(ext.pkgName) || /\batsumaru\b/i.test(ext.name);
 }
 
+function normalizeSourceName(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function extractHost(raw: string | null | undefined): string {
+  if (!raw) return '';
+  try {
+    return new URL(raw).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+function isBetterExtension(candidate: SuwayomiExtension, current: SuwayomiExtension): boolean {
+  if (candidate.isInstalled !== current.isInstalled) return candidate.isInstalled;
+  if (candidate.hasUpdate !== current.hasUpdate) return candidate.hasUpdate;
+  return candidate.versionName.localeCompare(current.versionName, undefined, { numeric: true }) > 0;
+}
+
+/**
+ * Deduplicates extensions returned across multiple Suwayomi extension stores
+ * (e.g. Keiyoushi + Yūzōnō), preferring installed, updatable, or newer versions.
+ */
+export function dedupeExtensions(extensions: SuwayomiExtension[]): SuwayomiExtension[] {
+  const result: SuwayomiExtension[] = [];
+  const byPkg = new Map<string, number>();
+  const byNameLang = new Map<string, number>();
+
+  for (const ext of extensions) {
+    const pkgKey = ext.pkgName.trim().toLowerCase();
+    const nameLangKey = `${normalizeSourceName(ext.name)}|${ext.lang.trim().toLowerCase()}`;
+    const existingIdx = byPkg.get(pkgKey) ?? byNameLang.get(nameLangKey);
+
+    if (existingIdx === undefined) {
+      const idx = result.length;
+      result.push(ext);
+      byPkg.set(pkgKey, idx);
+      byNameLang.set(nameLangKey, idx);
+      continue;
+    }
+
+    const current = result[existingIdx]!;
+    if (isBetterExtension(ext, current)) {
+      result[existingIdx] = ext;
+      byPkg.set(pkgKey, existingIdx);
+      byNameLang.set(nameLangKey, existingIdx);
+    }
+  }
+
+  return result;
+}
+
+function isBetterSourceNode(candidate: SuwayomiSourceNode, current: SuwayomiSourceNode): boolean {
+  const candEn = candidate.lang.trim().toLowerCase() === 'en';
+  const currEn = current.lang.trim().toLowerCase() === 'en';
+  if (candEn !== currEn) return candEn;
+
+  const candHasUrl = Boolean(extractHost(candidate.homeUrl) || extractHost(candidate.baseUrl));
+  const currHasUrl = Boolean(extractHost(current.homeUrl) || extractHost(current.baseUrl));
+  if (candHasUrl !== currHasUrl) return candHasUrl;
+
+  return false;
+}
+
+/**
+ * Deduplicates Suwayomi source nodes by id and site identity (e.g. when a multi-repo
+ * setup or multi-lang extension like NHentai/Hitomi/Pururin exposes both `en` and `all`),
+ * preferring `en` over `all`.
+ */
+export function dedupeSuwayomiSources(nodes: SuwayomiSourceNode[]): SuwayomiSourceNode[] {
+  const result: SuwayomiSourceNode[] = [];
+  const byId = new Map<string, number>();
+  const byName = new Map<string, number[]>();
+
+  for (const node of nodes) {
+    const idIdx = byId.get(node.id);
+    if (idIdx !== undefined) {
+      if (isBetterSourceNode(node, result[idIdx]!)) result[idIdx] = node;
+      continue;
+    }
+
+    const normName = normalizeSourceName(node.name);
+    const host = extractHost(node.homeUrl) || extractHost(node.baseUrl);
+    const candidates = byName.get(normName) ?? [];
+    const matchIdx = candidates.find((idx) => {
+      const existing = result[idx]!;
+      const existingHost = extractHost(existing.homeUrl) || extractHost(existing.baseUrl);
+      return !host || !existingHost || host === existingHost;
+    });
+
+    if (matchIdx === undefined) {
+      const idx = result.length;
+      result.push(node);
+      byId.set(node.id, idx);
+      candidates.push(idx);
+      byName.set(normName, candidates);
+      continue;
+    }
+
+    if (isBetterSourceNode(node, result[matchIdx]!)) {
+      byId.delete(result[matchIdx]!.id);
+      result[matchIdx] = node;
+      byId.set(node.id, matchIdx);
+    }
+  }
+
+  return result;
+}
+
 export function normalizeBaseUrl(raw: string): string {
   return raw.trim().replace(/\/+$/, '');
 }
@@ -211,13 +320,22 @@ export class SuwayomiClient {
     return normalizeBaseUrl(this.getBaseUrl());
   }
 
-  private async graphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  private async graphql<T>(
+    query: string,
+    variables?: Record<string, unknown>,
+    opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<T> {
     const base = this.baseUrl();
     if (!base) throw new Error('Suwayomi-Server URL is not configured');
+    const timeoutMs = opts.timeoutMs ?? 60_000;
+    const timeoutSignal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
+    const signal =
+      opts.signal && timeoutSignal ? AbortSignal.any([opts.signal, timeoutSignal]) : (opts.signal ?? timeoutSignal);
     const res = await this.fetchImpl(`${base}/api/graphql`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json' },
       body: JSON.stringify({ query, variables }),
+      signal,
     });
     if (!res.ok) {
       throw new Error(`Suwayomi HTTP ${res.status} ${res.statusText}`);
@@ -264,6 +382,45 @@ export class SuwayomiClient {
     } catch {
       return false;
     }
+  }
+
+  /** Fetches a manga thumbnail from Suwayomi-Server, verifying the URL belongs to the configured server. */
+  async fetchThumbnail(rawUrl: string): Promise<{ buffer: Buffer; contentType: string }> {
+    const base = this.baseUrl();
+    if (!base) throw Object.assign(new Error('Suwayomi-Server URL is not configured'), { statusCode: 400 });
+    let target: URL;
+    let baseParsed: URL;
+    try {
+      target = new URL(rawUrl, base);
+      baseParsed = new URL(base);
+    } catch {
+      throw Object.assign(new Error('Invalid Suwayomi thumbnail URL'), { statusCode: 400 });
+    }
+    const isLoopback = (h: string) => h === '127.0.0.1' || h === 'localhost' || h === '::1';
+    const sameHost =
+      target.hostname === baseParsed.hostname || (isLoopback(target.hostname) && isLoopback(baseParsed.hostname));
+    if (
+      target.protocol !== baseParsed.protocol ||
+      target.port !== baseParsed.port ||
+      !sameHost ||
+      !target.pathname.startsWith('/api/v1/manga/')
+    ) {
+      throw Object.assign(new Error('URL does not match configured Suwayomi-Server thumbnail endpoint'), {
+        statusCode: 400,
+      });
+    }
+    const res = await this.fetchImpl(target.href, { signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) {
+      throw Object.assign(new Error(`Suwayomi thumbnail HTTP ${res.status}`), {
+        statusCode: res.status >= 500 ? 502 : res.status,
+      });
+    }
+    const contentType = res.headers.get('content-type') || 'image/jpeg';
+    if (!contentType.toLowerCase().startsWith('image/')) {
+      throw Object.assign(new Error('Suwayomi thumbnail did not return an image'), { statusCode: 502 });
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    return { buffer, contentType };
   }
 
   async addExtensionStore(indexUrl: string): Promise<void> {
@@ -366,6 +523,7 @@ export function createSuwayomiAdapter(node: SuwayomiSourceNode, client: Suwayomi
     baseUrl: node.homeUrl || node.baseUrl || base() || 'http://localhost:4567',
     kind: 'suwayomi',
     medium: 'comic',
+    nsfw: node.isNsfw,
     hosts: [],
     rateLimit: { rpm: 600, concurrency: 4 },
 

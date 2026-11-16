@@ -4,22 +4,27 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { SuwayomiStatus } from '@atsusync/shared';
 import type { SettingsStore } from '../settings.ts';
-import { isAtsumaruExtension, isEnglishLang, type SuwayomiClient } from './suwayomi.ts';
+import { downloadAndExtractArchive, findFileRecursive } from './runtime.ts';
+import { dedupeExtensions, isAtsumaruExtension, isEnglishLang, type SuwayomiClient } from './suwayomi.ts';
 
 const execFileAsync = promisify(execFile);
 
 export const DEFAULT_SUWAYOMI_URL = 'http://127.0.0.1:4567';
 export const KEIYOUSHI_REPO_URL = 'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb';
 export const KEIYOUSHI_LEGACY_REPO_URL = 'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json';
+export const YUZONO_REPO_URL = 'https://raw.githubusercontent.com/yuzono/cursed-manga-repo/repo/index.pb';
 const RELEASES_API = 'https://api.github.com/repos/Suwayomi/Suwayomi-Server/releases/latest';
 
 export class SuwayomiManager {
   private child: ChildProcess | null = null;
   private lastError: string | null = null;
   private setupInFlight: Promise<SuwayomiStatus> | null = null;
+  private updateInFlight: Promise<number> | null = null;
   private baseDir: string;
   private jarPath: string;
   private serverDataDir: string;
+  private jreDir: string;
+  private javaBin = 'java';
 
   constructor(
     dataDir: string,
@@ -30,6 +35,7 @@ export class SuwayomiManager {
     this.baseDir = join(dataDir, 'suwayomi');
     this.jarPath = join(this.baseDir, 'Suwayomi-Server.jar');
     this.serverDataDir = join(this.baseDir, 'server-data');
+    this.jreDir = join(this.baseDir, 'jre');
   }
 
   async status(): Promise<SuwayomiStatus> {
@@ -47,7 +53,7 @@ export class SuwayomiManager {
 
   /**
    * One-click setup: ensures Suwayomi-Server is running (downloading the JAR & launching it
-   * via Java if needed), points AtsuSync at it, registers the keiyoushi/extensions repo,
+   * via Java if needed), points AtsuSync at it, registers the Keiyoushi & Yūzōnō repos,
    * and fetches the extension catalog.
    */
   async setupAndStart(): Promise<SuwayomiStatus> {
@@ -56,6 +62,25 @@ export class SuwayomiManager {
       this.setupInFlight = null;
     });
     return this.setupInFlight;
+  }
+
+  /** Registers Keiyoushi and Yūzōnō extension repositories (ignoring stores already added). */
+  async ensureExtensionStores(): Promise<void> {
+    try {
+      await this.client.addExtensionStore(KEIYOUSHI_REPO_URL);
+    } catch {
+      try {
+        await this.client.addExtensionStore(KEIYOUSHI_LEGACY_REPO_URL);
+      } catch {
+        // Store may already exist; fetchExtensions below will verify.
+      }
+    }
+
+    try {
+      await this.client.addExtensionStore(YUZONO_REPO_URL);
+    } catch {
+      // Store may already exist or be unreachable; don't block Keiyoushi.
+    }
   }
 
   private async runSetup(): Promise<SuwayomiStatus> {
@@ -74,17 +99,7 @@ export class SuwayomiManager {
         await this.startProcess(targetUrl);
       }
 
-      // Register the Keiyoushi extension repository (ignore if already added).
-      try {
-        await this.client.addExtensionStore(KEIYOUSHI_REPO_URL);
-      } catch {
-        try {
-          await this.client.addExtensionStore(KEIYOUSHI_LEGACY_REPO_URL);
-        } catch {
-          // Store may already exist; fetchExtensions below will verify.
-        }
-      }
-
+      await this.ensureExtensionStores();
       await this.syncEnglishExtensions();
       return await this.status();
     } catch (err) {
@@ -109,9 +124,10 @@ export class SuwayomiManager {
     return true;
   }
 
-  /** Fetches the Keiyoushi catalog and installs/updates every English (and multi-lang) extension. */
+  /** Fetches the Keiyoushi & Yūzōnō catalogs and installs/updates every English (and multi-lang) extension. */
   async syncEnglishExtensions(): Promise<void> {
-    const extensions = await this.client.fetchExtensions();
+    await this.ensureExtensionStores();
+    const extensions = dedupeExtensions(await this.client.fetchExtensions());
     const targets = extensions
       .filter((e) => isEnglishLang(e.lang) && !isAtsumaruExtension(e) && (!e.isInstalled || e.hasUpdate))
       .map((e) => e.pkgName);
@@ -120,12 +136,58 @@ export class SuwayomiManager {
     }
   }
 
-  private async ensureJava() {
+  /** Checks the registered repos and updates any installed extensions that have a newer version on GitHub. */
+  async updateInstalledExtensions(): Promise<number> {
+    if (this.setupInFlight) return 0;
+    if (this.updateInFlight) return this.updateInFlight;
+    this.updateInFlight = this.runUpdateInstalled().finally(() => {
+      this.updateInFlight = null;
+    });
+    return this.updateInFlight;
+  }
+
+  private async runUpdateInstalled(): Promise<number> {
+    if (!this.settings.get().suwayomiUrl.trim()) return 0;
+    if (!(await this.client.ping())) return 0;
+    const extensions = dedupeExtensions(await this.client.fetchExtensions());
+    const targets = extensions
+      .filter((e) => e.isInstalled && e.hasUpdate && !isAtsumaruExtension(e))
+      .map((e) => e.pkgName);
+    if (targets.length) {
+      await this.client.installAndUpdateExtensions(targets);
+    }
+    return targets.length;
+  }
+
+  private jreDownloadUrl(): string {
+    const os =
+      process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'mac' : 'linux';
+    const arch = process.arch === 'arm64' ? 'aarch64' : 'x64';
+    return `https://api.adoptium.net/v3/binary/latest/21/ga/${os}/${arch}/jre/hotspot/normal/eclipse`;
+  }
+
+  private async ensureJava(): Promise<void> {
     try {
       await execFileAsync('java', ['-version']);
+      this.javaBin = 'java';
+      return;
     } catch {
-      throw new Error('Java (JDK/JRE 21+) was not found on PATH. Install Java or run Suwayomi-Server via Docker and set its URL.');
+      // Fall back to portable JRE 21 in data/suwayomi/jre.
     }
+
+    const exe = process.platform === 'win32' ? 'java.exe' : 'java';
+    const existing = findFileRecursive(this.jreDir, exe);
+    if (existing) {
+      this.javaBin = existing;
+      return;
+    }
+
+    await downloadAndExtractArchive(this.jreDownloadUrl(), this.jreDir, this.fetchImpl);
+    const installed = findFileRecursive(this.jreDir, exe);
+    if (!installed) {
+      throw new Error('Failed to locate Java binary after downloading portable JRE 21.');
+    }
+    this.javaBin = installed;
   }
 
   private async ensureJar() {
@@ -169,7 +231,7 @@ export class SuwayomiManager {
 
     const stderrTail: string[] = [];
     const child = spawn(
-      'java',
+      this.javaBin,
       [
         `-Dsuwayomi.tachidesk.config.server.rootDir=${this.serverDataDir}`,
         `-Dsuwayomi.tachidesk.config.server.port=${port}`,
