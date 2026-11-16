@@ -6,16 +6,21 @@ import { dynasty } from './adapters/dynasty.ts';
 import { lewdmanhwa } from './adapters/lewdmanhwa.ts';
 import { mangacherri } from './adapters/mangacherri.ts';
 import { mangadex } from './adapters/mangadex.ts';
+import { hiraeth } from './adapters/hiraeth.ts';
 import { kingofshojo } from './adapters/kingofshojo.ts';
+import { knoxt } from './adapters/knoxt.ts';
 import { mgeko } from './adapters/mgeko.ts';
 import { mangafreak } from './adapters/mangafreak.ts';
 import { mangapill } from './adapters/mangapill.ts';
 import { mangaread } from './adapters/mangaread.ts';
+import { novelcool } from './adapters/novelcool.ts';
 import { nuviatoon } from './adapters/nuviatoon.ts';
 import { readmanga } from './adapters/readmanga.ts';
 import { webcomics } from './adapters/webcomics.ts';
 import { webtoon } from './adapters/webtoon.ts';
 import { weebcentral } from './adapters/weebcentral.ts';
+import { wuxiaworld } from './adapters/wuxiaworld.ts';
+import { wuxiaworldsite } from './adapters/wuxiaworldsite.ts';
 import { SourceHttp } from './http.ts';
 import { matchesUrl, mediumOf, type SourceAdapter } from './types.ts';
 
@@ -37,6 +42,12 @@ const ADAPTERS: SourceAdapter[] = [
   readmanga,
   mangaread,
   webcomics,
+  // Novels (downloaded as EPUBs)
+  wuxiaworld,
+  novelcool,
+  wuxiaworldsite,
+  hiraeth,
+  knoxt,
 ];
 
 export class SourceRegistry {
