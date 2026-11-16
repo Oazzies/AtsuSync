@@ -12,6 +12,10 @@ export interface MadaraConfig {
   kind: SourceKind;
   /** 'novel' sites serve text at /novel/<slug>/ and list chapters through ajax/chapters/. */
   medium?: SourceMedium;
+  /** Some comic Madara sites also require POST ajax/chapters/ for the chapter list. */
+  ajaxChapters?: boolean;
+  /** Skip robots.txt checks for this site's endpoints. */
+  ignoreRobots?: boolean;
   hosts: string[];
   rateLimit?: { rpm: number; concurrency: number };
 }
@@ -135,6 +139,7 @@ export function parseMadaraText(html: string, fallbackTitle: string): NovelChapt
 export function createMadaraAdapter(cfg: MadaraConfig): SourceAdapter {
   const base = cfg.baseUrl.replace(/\/$/, '');
   const novel = cfg.medium === 'novel';
+  const ignoreRobots = cfg.ignoreRobots;
   return {
     id: cfg.id,
     name: cfg.name,
@@ -146,20 +151,21 @@ export function createMadaraAdapter(cfg: MadaraConfig): SourceAdapter {
 
     async search(title, http) {
       const url = `${base}/?s=${encodeURIComponent(title)}&post_type=wp-manga`;
-      return parseMadaraSearch(await http.text(url, { cacheMs: 60 * 60_000 }), base);
+      return parseMadaraSearch(await http.text(url, { cacheMs: 60 * 60_000, ignoreRobots }), base);
     },
 
     async getSeries(url, http) {
       const slug = madaraSlugFromUrl(url);
       if (!slug) throw new Error(`Not a ${cfg.name} series URL: ${url}`);
-      const html = await http.text(url, { cacheMs: 10 * 60_000 });
-      if (!novel) return parseMadaraSeries(html, url, base);
-      // Novel pages only embed the latest few chapters; the full list is a POST to ajax/chapters/.
+      const html = await http.text(url, { cacheMs: 10 * 60_000, ignoreRobots });
+      if (!novel && !cfg.ajaxChapters) return parseMadaraSeries(html, url, base);
+      // Some Madara sites only embed the latest few chapters (or none); the full list is a POST to ajax/chapters/.
       const seriesUrl = url.endsWith('/') ? url : `${url}/`;
       const list = await http.text(`${seriesUrl}ajax/chapters/`, {
         method: 'POST',
         headers: { 'x-requested-with': 'XMLHttpRequest', referer: url },
         cacheMs: 10 * 60_000,
+        ignoreRobots,
       });
       return parseMadaraSeries(`${html}<ul>${list}</ul>`, url, base);
     },
@@ -167,13 +173,13 @@ export function createMadaraAdapter(cfg: MadaraConfig): SourceAdapter {
     ...(novel
       ? {
           async getChapterText(chapter: SourceChapter, http: SourceHttp) {
-            return parseMadaraText(await http.text(chapter.url), chapter.label);
+            return parseMadaraText(await http.text(chapter.url, { ignoreRobots }), chapter.label);
           },
         }
       : {}),
 
     async getChapterPages(chapter, http) {
-      return parseMadaraPages(await http.text(chapter.url), chapter.url, base);
+      return parseMadaraPages(await http.text(chapter.url, { ignoreRobots }), chapter.url, base);
     },
   };
 }
