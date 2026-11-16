@@ -10,7 +10,7 @@ import { mangapill } from './adapters/mangapill.ts';
 import { nuviatoon } from './adapters/nuviatoon.ts';
 import { webtoon } from './adapters/webtoon.ts';
 import { SourceHttp } from './http.ts';
-import { matchesUrl, type SourceAdapter } from './types.ts';
+import { matchesUrl, mediumOf, type SourceAdapter } from './types.ts';
 
 // Register new source sites here.
 const ADAPTERS: SourceAdapter[] = [nuviatoon, mangadex, mgeko, kingofshojo, webtoon, mangapill, lewdmanhwa, mangafreak, arenascan];
@@ -61,7 +61,7 @@ export class SourceRegistry {
 
   info(): SourceInfo[] {
     const enabled = new Set(this.enabled().map((a) => a.id));
-    return this.all().map((a) => ({ id: a.id, name: a.name, baseUrl: a.baseUrl, kind: a.kind, enabled: enabled.has(a.id), searchable: !!a.search }));
+    return this.all().map((a) => ({ id: a.id, name: a.name, baseUrl: a.baseUrl, kind: a.kind, medium: mediumOf(a), enabled: enabled.has(a.id), searchable: !!a.search }));
   }
 
   setEnabled(id: string, enabled: boolean) {

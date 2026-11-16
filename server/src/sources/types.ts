@@ -1,7 +1,7 @@
-import type { SourceChapter, SourceKind, SourceSeries, SourceSeriesHit } from '@atsusync/shared';
+import type { SourceChapter, SourceChapterAlt, SourceKind, SourceMedium, SourceSeries, SourceSeriesHit } from '@atsusync/shared';
 import type { SourceHttp } from './http.ts';
 
-export type { SourceChapter, SourceChapterAlt, SourceKind, SourceSeries, SourceSeriesHit };
+export type { SourceChapter, SourceChapterAlt, SourceKind, SourceMedium, SourceSeries, SourceSeriesHit };
 
 /** A single image to download for a chapter, with any headers the host requires. */
 export interface PageRef {
@@ -19,6 +19,8 @@ export interface SourceAdapter {
   name: string;
   baseUrl: string;
   kind: SourceKind;
+  /** Defaults to 'comic'. A 'novel' adapter implements getChapterText; its chapters download as EPUBs. */
+  medium?: SourceMedium;
   /** Hostnames this adapter owns; used for "paste a URL" and the rate limiter. */
   hosts: string[];
   /** Politeness budget, applied per host by SourceHttp. */
@@ -29,6 +31,8 @@ export interface SourceAdapter {
   getSeries(url: string, http: SourceHttp): Promise<SourceSeries>;
   /** Resolve pages right before downloading — some hosts sign URLs with short expiries. */
   getChapterPages(chapter: SourceChapter, http: SourceHttp): Promise<PageRef[]>;
+  /** Novel sources: the chapter's text as XHTML paragraphs (see novel.ts). Required when medium is 'novel'. */
+  getChapterText?(chapter: SourceChapter, http: SourceHttp): Promise<NovelChapter>;
 }
 
 export const matchesUrl = (adapter: SourceAdapter, url: string) => {
@@ -39,3 +43,13 @@ export const matchesUrl = (adapter: SourceAdapter, url: string) => {
     return false;
   }
 };
+
+/** A novel chapter's text. `html` is well-formed XHTML (block elements only) ready to drop into an EPUB body. */
+export interface NovelChapter {
+  title: string;
+  html: string;
+  /** Inline images referenced from `html` by `src`; bundled into the EPUB. */
+  images?: { src: string; url: string; headers?: Record<string, string> }[];
+}
+
+export const mediumOf = (a: Pick<SourceAdapter, 'medium'>): SourceMedium => a.medium ?? 'comic';

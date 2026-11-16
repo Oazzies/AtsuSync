@@ -42,6 +42,12 @@ web/src/views/                      Vue pages
 - Sites behind a bot challenge (Cloudflare "Just a moment…") are not supported. AtsuSync stops instead of trying to get past them.
 - Requests to atsu.moe are spaced at least 350 ms apart; the "already on Atsu?" checker does a few requests per 2 minutes.
 
+## Novels
+
+Atsumaru accepts novels as `.epub`, `.pdf`, `.docx`, `.txt` or `.md` on its upload page. Adapters with `medium: 'novel'` implement `getChapterText` instead of `getChapterPages`; the download pipeline fetches the chapter text (and any illustrations), sanitizes it to XHTML paragraphs, and writes `data/downloads/<series>/<chapter>.epub`. Upload it with **Add archive** on atsu.moe/upload like any chapter file.
+
+Novel requests (tagged *Novel*, or with "(Novel)" / "light novel" in the title) only search novel sources, and comic requests never search them. Current novel sources: Wuxiaworld (official; paid/Karma chapters fail at download with a "locked" message), NovelCool, Wuxiaworld.site, Hiraeth Translation, KnoxT. Sites from [everythingmoe](https://everythingmoe.com/section/novel) that were checked and skipped: those behind a Cloudflare challenge (FreeWebNovel, Royal Road, ScribbleHub, NovelFull, Foxaholic, Novelhall), ones whose robots.txt forbids novel pages (NovelPing, WoopRead), and ones whose chapter lists or text only load through client-side APIs or redirects (NovelFire, NovelBuddy, lightnovel.to, MVLEMPYR, Wuxia Dreams, ScrollersPub), NovelDex, NovelsTime, Chikari Novel, Full Novels). Requiem Translations and J-Novel Club need a login to read, 9Kafe is an ebook-download site, and the remaining list entries are machine-translation sites, so none of those were added.
+
 ## Source kinds
 
 Each adapter sets `kind`: `scanlation` (the group's own site) or `aggregator` (re-hosts releases, e.g. official Webtoon chapters). The UI groups and filters by kind.

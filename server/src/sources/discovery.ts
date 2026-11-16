@@ -2,9 +2,10 @@ import type { ContentRequest, SourceMatch } from '@atsusync/shared';
 import type { Db } from '../db/client.ts';
 import { tx } from '../db/client.ts';
 import { getMangaBakaSeries } from '../atsu/mangabaka.ts';
+import { wantsNovel } from '../atsu/presence.ts';
 import { bestScore, searchQueries } from './match.ts';
 import type { SourceRegistry } from './registry.ts';
-import type { SourceAdapter, SourceSeriesHit } from './types.ts';
+import { mediumOf, type SourceAdapter, type SourceSeriesHit } from './types.ts';
 
 const MIN_SCORE = 0.45;
 const MAX_HITS_PER_SOURCE = 3;
@@ -56,7 +57,9 @@ export class Discovery {
   async find(req: ContentRequest): Promise<SourceMatch[]> {
     const titles = await this.titlesFor(req);
     const queries = searchQueries(titles);
-    const results = await Promise.all(this.sources.enabled().filter((a) => a.search).map((a) => this.searchOne(a, titles, queries)));
+    // A Novel request only searches novel sources; comic requests never search them.
+    const medium = wantsNovel(req) ? 'novel' : 'comic';
+    const results = await Promise.all(this.sources.enabled().filter((a) => a.search && mediumOf(a) === medium).map((a) => this.searchOne(a, titles, queries)));
     const rows = results.flat().map((m) => ({ ...m, request_id: req.id }));
     tx(this.db, () => {
       this.db.prepare('DELETE FROM source_matches WHERE request_id = ?').run(req.id);

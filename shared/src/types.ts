@@ -81,11 +81,15 @@ export interface RequestComment {
 /** Scanlation = the group's own site; aggregator = re-hosts other groups' or official releases; official = the publisher's own platform. */
 export type SourceKind = 'scanlation' | 'aggregator' | 'official';
 
+/** Comics are downloaded as page-image ZIPs, novels as one EPUB per chapter. */
+export type SourceMedium = 'comic' | 'novel';
+
 export interface SourceInfo {
   id: string;
   name: string;
   baseUrl: string;
   kind: SourceKind;
+  medium: SourceMedium;
   enabled: boolean;
   /** False for sources that can only be linked by pasting a series URL. */
   searchable: boolean;

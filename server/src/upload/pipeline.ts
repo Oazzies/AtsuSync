@@ -1,11 +1,15 @@
 import { mkdirSync, readdirSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import type { ChapterState, DownloadJob, JobState, SourceChapter } from '@atsusync/shared';
 import { uploadMangaBakaId } from '../atsu/requests.ts';
 import type { Db } from '../db/client.ts';
 import { events } from '../events.ts';
 import type { LinksRepo } from '../links.ts';
+import { BlockedError } from '../polite.ts';
 import type { SourceRegistry } from '../sources/registry.ts';
+import type { SourceAdapter } from '../sources/types.ts';
+import { mediumOf } from '../sources/types.ts';
+import { createEpub, imageMediaType, type EpubImage } from './epub.ts';
 import { looksLikeImage, mergeSliverPages, type PageFile } from './fixups.ts';
 import { createZip } from './zip.ts';
 
@@ -94,7 +98,7 @@ export class DownloadPipeline {
     } catch {
       return null;
     }
-    return { path: row.file_path, name: `${safeName(job.seriesTitle)} - ${safeName(job.chapterLabel)}.zip` };
+    return { path: row.file_path, name: `${safeName(job.seriesTitle)} - ${safeName(job.chapterLabel)}${extname(row.file_path) || '.zip'}` };
   }
 
   /** `urls` overrides a chapter's page URL for this download only (see addFromSource). */
@@ -212,6 +216,11 @@ export class DownloadPipeline {
     return this.removeJobs(this.finishedRows('link_id = ?', linkId));
   }
 
+  /** Remove one finished download job and its ZIP file from disk. */
+  remove(id: number): { jobs: number; files: number } {
+    return this.removeJobs(this.finishedRows('id = ?', id));
+  }
+
   private finishedRows(where: string, arg: number): FinishedRow[] {
     return this.db
       .prepare(`SELECT id, chapter_id, state, file_path, prev_chapter_state FROM upload_jobs WHERE ${where} AND state IN ('done','failed','cancelled')`)
@@ -274,12 +283,16 @@ export class DownloadPipeline {
       if (this.busyLinks.has(row.link_id) || this.running.has(row.id)) continue;
       this.running.add(row.id);
       this.busyLinks.add(row.link_id);
-      void this.run(row.id).finally(() => {
-        this.running.delete(row.id);
-        this.busyLinks.delete(row.link_id);
-        this.cancelled.delete(row.id);
-        this.pump();
-      });
+      // run() only handles errors once its try block starts; a job whose setup throws (e.g. its source was
+      // removed) must end up failed, or it stays queued and pump() re-runs it in an endless loop.
+      void this.run(row.id)
+        .catch((err) => this.finish(row.id, 'failed', (err as Error).message))
+        .finally(() => {
+          this.running.delete(row.id);
+          this.busyLinks.delete(row.link_id);
+          this.cancelled.delete(row.id);
+          this.pump();
+        });
     }
   }
 
@@ -290,6 +303,49 @@ export class DownloadPipeline {
     const path = join(seriesDir, `${safeName(chapterLabel)}.zip`);
     writeFileSync(path, createZip(files));
     return { path, size: statSync(path).size };
+  }
+
+  /** Write a novel chapter's EPUB to `<dir>/<series>/<chapter>.epub`. */
+  private saveEpub(seriesTitle: string, chapterLabel: string, data: Buffer): { path: string; size: number } {
+    const seriesDir = join(this.dir, safeName(seriesTitle));
+    mkdirSync(seriesDir, { recursive: true });
+    const path = join(seriesDir, `${safeName(chapterLabel)}.epub`);
+    writeFileSync(path, data);
+    return { path, size: statSync(path).size };
+  }
+
+  /** Novel sources: fetch the chapter text (plus any inline images) and write it as an EPUB. */
+  private async runNovel(id: number, adapter: SourceAdapter, chapter: SourceChapter, seriesTitle: string, checkCancel: () => void) {
+    if (!adapter.getChapterText) throw new Error(`${adapter.name} cannot download novel chapters`);
+    this.setState(id, 'downloading', `Fetching the text of ${chapter.label} from ${adapter.name}`);
+    const text = await adapter.getChapterText(chapter, this.sources.http);
+    const images: EpubImage[] = [];
+    const wanted = text.images ?? [];
+    this.update(id, { total: 1 + wanted.length, progress: 1 });
+    let completed = 0;
+    for (const img of wanted) {
+      checkCancel();
+      try {
+        const { bytes, contentType } = await this.sources.http.bytes(img.url, { headers: img.headers });
+        const mediaType = imageMediaType(bytes, contentType);
+        if (!mediaType || !looksLikeImage(bytes)) {
+          this.log(id, `Warning: Illustration ${img.url} is not a valid image (${bytes.length} bytes) — skipped`);
+        } else {
+          images.push({ src: img.src, bytes, mediaType });
+        }
+      } catch (err) {
+        if (err instanceof CancelError || err instanceof BlockedError) throw err;
+        this.log(id, `Warning: Illustration ${img.url} failed (${(err as Error).message}) — skipped`);
+      }
+      this.update(id, { progress: 1 + ++completed });
+    }
+    checkCancel();
+    if (text.html.replace(/<[^>]+>/g, '').trim().length < 20) throw new Error(`${adapter.name} returned no text for ${chapter.label} (locked or empty?)`);
+    const epub = createEpub({ seriesTitle, chapterTitle: text.title || chapter.label, bodyHtml: text.html, images });
+    const { path, size } = this.saveEpub(seriesTitle, chapter.label, epub);
+    this.db.prepare('UPDATE upload_jobs SET file_path = ?, file_size = ? WHERE id = ?').run(path, size, id);
+    this.log(id, `Saved EPUB with ${text.html.split('</p>').length - 1} paragraph(s)${images.length ? ` and ${images.length} image(s)` : ''} (${(size / 1024).toFixed(0)} KB) to ${path}`);
+    this.finish(id, 'done', null);
   }
 
   private async run(id: number) {
@@ -304,6 +360,10 @@ export class DownloadPipeline {
     };
 
     try {
+      if (mediumOf(adapter) === 'novel') {
+        await this.runNovel(id, adapter, { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked }, link.seriesTitle, checkCancel);
+        return;
+      }
       this.setState(id, 'downloading', `Resolving pages for ${chapter.label} from ${adapter.name}`);
       const pages = await adapter.getChapterPages(
         { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked },
@@ -312,19 +372,35 @@ export class DownloadPipeline {
       this.update(id, { total: pages.length, progress: 0 });
 
       // Pages download in parallel (the per-host limiter still caps it); results keep page order.
-      let files: PageFile[] = new Array(pages.length);
+      const rawFiles: (PageFile | undefined)[] = new Array(pages.length);
       let next = 0;
       let done = 0;
+      let skipped = 0;
+      let firstSkipReason: string | null = null;
       const worker = async () => {
         try {
           while (next < pages.length) {
             checkCancel();
             const i = next++;
             const p = pages[i]!;
-            const { bytes } = await this.sources.http.bytes(p.url, { headers: p.headers });
-            // Tiny but valid images (blank pages) are fine; only reject error bodies and truncated files.
-            if (bytes.length < 64 || !looksLikeImage(bytes)) throw new Error(`Page ${p.name} is not a valid image (${bytes.length} bytes)`);
-            files[i] = { name: p.name, bytes };
+            try {
+              const { bytes } = await this.sources.http.bytes(p.url, { headers: p.headers });
+              // Tiny but valid images (blank pages) are fine; only reject error bodies and truncated files.
+              if (bytes.length < 64 || !looksLikeImage(bytes)) {
+                const reason = `Page ${p.name} is not a valid image (${bytes.length} bytes)`;
+                skipped++;
+                firstSkipReason ??= reason;
+                this.log(id, `Warning: ${reason} — skipped`);
+              } else {
+                rawFiles[i] = { name: p.name, bytes };
+              }
+            } catch (err) {
+              if (err instanceof CancelError || err instanceof BlockedError) throw err;
+              const reason = `Page ${p.name} failed (${(err as Error).message})`;
+              skipped++;
+              firstSkipReason ??= reason;
+              this.log(id, `Warning: ${reason} — skipped`);
+            }
             this.update(id, { progress: ++done });
           }
         } catch (err) {
@@ -335,12 +411,16 @@ export class DownloadPipeline {
       await Promise.all(Array.from({ length: Math.min(PAGE_PARALLELISM, pages.length) }, worker));
 
       checkCancel();
+      let files = rawFiles.filter((f): f is PageFile => f !== undefined);
+      if (files.length === 0) {
+        throw new Error(firstSkipReason ?? `No valid images downloaded from ${adapter.name}`);
+      }
       const fixed = await mergeSliverPages(files);
       if (fixed.merged > 0) this.log(id, `Joined ${fixed.merged} thin leftover strip(s) onto the pages above them (${files.length} → ${fixed.files.length} pages)`);
       files = fixed.files;
       const { path, size } = this.bundle(link.seriesTitle, chapter.label, files);
       this.db.prepare('UPDATE upload_jobs SET file_path = ?, file_size = ? WHERE id = ?').run(path, size, id);
-      this.log(id, `Saved ${files.length} pages (${(size / 1024 / 1024).toFixed(1)} MB) to ${path}`);
+      this.log(id, `Saved ${files.length} pages${skipped > 0 ? ` (${skipped} skipped)` : ''} (${(size / 1024 / 1024).toFixed(1)} MB) to ${path}`);
       this.finish(id, 'done', null);
     } catch (err) {
       if (err instanceof CancelError) this.finish(id, 'cancelled', 'Cancelled');
@@ -355,6 +435,19 @@ export class DownloadPipeline {
     // 'downloaded' = the ZIP is ready but not yet uploaded to Atsumaru; the user marks it uploaded themselves.
     this.links.setChapterState([job.chapterId], state === 'done' ? 'downloaded' : row.prev_chapter_state);
     this.log(id, state === 'done' ? 'Ready to download' : `${state}: ${error}`);
+    if (state === 'done') {
+      const remaining = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM upload_jobs WHERE link_id = ? AND state IN ('queued','downloading')`)
+        .get(job.linkId) as { n: number };
+      if (remaining.n === 0) {
+        const ready = this.db
+          .prepare(`SELECT COUNT(*) AS n FROM upload_jobs WHERE link_id = ? AND state = 'done'`)
+          .get(job.linkId) as { n: number };
+        if (ready.n > 0) {
+          events.emitEvent({ type: 'downloads_complete', linkId: job.linkId, seriesTitle: job.seriesTitle, count: ready.n });
+        }
+      }
+    }
   }
 
   private setState(id: number, state: JobState, msg: string) {
