@@ -164,6 +164,32 @@ export interface SourceMatch {
   fetchedAt: number;
 }
 
+/** Rank score (0..1) combining title similarity and chapter-count closeness. */
+export function sourceMatchRank(m: SourceMatch, expectedChapters?: number | null): number {
+  if (expectedChapters && expectedChapters > 0) {
+    const ch = m.chapterCount ?? 0;
+    const chapterCloseness = ch > 0 ? Math.min(ch, expectedChapters) / Math.max(ch, expectedChapters) : 0;
+    return 0.65 * m.score + 0.35 * chapterCloseness;
+  }
+  const chBonus = m.chapterCount && m.chapterCount > 0 ? Math.min(1, Math.log10(m.chapterCount + 1) / 3) : 0;
+  return 0.85 * m.score + 0.15 * chBonus;
+}
+
+/** Sort source matches with best-fitting (no error, close title, close chapter count) first. */
+export function rankSourceMatches(matches: SourceMatch[], expectedChapters?: number | null): SourceMatch[] {
+  return [...matches].sort((a, b) => {
+    const aErr = a.error ? 1 : 0;
+    const bErr = b.error ? 1 : 0;
+    if (aErr !== bErr) return aErr - bErr;
+    const rankDiff = sourceMatchRank(b, expectedChapters) - sourceMatchRank(a, expectedChapters);
+    if (Math.abs(rankDiff) > 1e-6) return rankDiff;
+    if (b.score !== a.score) return b.score - a.score;
+    const chDiff = (b.chapterCount ?? -1) - (a.chapterCount ?? -1);
+    if (chDiff !== 0) return chDiff;
+    return a.sourceName.localeCompare(b.sourceName);
+  });
+}
+
 export interface AtsuOtherSource {
   id: string;
   label: string;
@@ -294,4 +320,4 @@ export type ServerEvent =
   | { type: 'requests_synced'; added: number }
   | { type: 'discovery_start'; requestId: string; sources: { id: string; name: string }[] }
   | { type: 'discovery_progress'; requestId: string; sourceId: string; sourceName: string; matches: SourceMatch[]; error: string | null }
-  | { type: 'discovery_done'; requestId: string };
+  | { type: 'discovery_done'; requestId: string; seriesTitle: string; matchCount: number };

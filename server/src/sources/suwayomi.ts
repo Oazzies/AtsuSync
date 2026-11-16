@@ -28,7 +28,7 @@ export interface SuwayomiChapter {
   id: number;
   url: string;
   name: string;
-  uploadDate: number;
+  uploadDate: number | string | null;
   chapterNumber: number;
   scanlator: string | null;
   mangaId: number;
@@ -342,6 +342,21 @@ function buildChapterUrl(ch: SuwayomiChapter, baseUrl: string): string {
   return `${base.split('#')[0]}#suwayomi-ch=${ch.id}`;
 }
 
+/** Parses Suwayomi's `LongString` (or numeric) epoch-ms `uploadDate` into `YYYY-MM-DD`, never throwing. */
+function formatUploadDate(raw: number | string | null | undefined): string | undefined {
+  if (raw == null || raw === '') return undefined;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (Number.isFinite(n) && n > 0) {
+    const d = new Date(n);
+    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
+  if (typeof raw === 'string') {
+    const d = new Date(raw);
+    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
+  return undefined;
+}
+
 /** Wraps one installed Suwayomi/Keiyoushi source as an AtsuSync SourceAdapter. */
 export function createSuwayomiAdapter(node: SuwayomiSourceNode, client: SuwayomiClient): SourceAdapter {
   const base = () => client.baseUrl();
@@ -377,7 +392,7 @@ export function createSuwayomiAdapter(node: SuwayomiSourceNode, client: Suwayomi
         const number = parseChapterNumber(ch);
         if (!Number.isFinite(number)) continue;
         const chUrl = buildChapterUrl(ch, b);
-        const date = ch.uploadDate > 0 ? new Date(ch.uploadDate).toISOString().slice(0, 10) : undefined;
+        const date = formatUploadDate(ch.uploadDate);
         const group = ch.scanlator?.trim() || undefined;
         const existing = byNumber.get(number);
         if (!existing) {

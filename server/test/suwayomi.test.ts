@@ -199,7 +199,7 @@ function mockSuwayomiFetch() {
                 id: 102,
                 url: '/chapter/102',
                 name: 'Ch. 2',
-                uploadDate: 1700000000000,
+                uploadDate: '1700000000000',
                 chapterNumber: -1,
                 scanlator: 'Group B',
                 mangaId: 42,

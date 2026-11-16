@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { SourceChapter } from '@atsusync/shared';
+import { rankSourceMatches, type SourceChapter, type SourceMatch } from '@atsusync/shared';
 import { buildApp } from '../src/app.ts';
 import { events } from '../src/events.ts';
 import type { SourceAdapter } from '../src/sources/types.ts';
@@ -309,6 +309,33 @@ describe('download pipeline', () => {
     expect(t.links.chapters(link.id).find((c) => c.id === pending.id)!.state).toBe('pending');
   });
 
+  it('deleting a link while a download is in flight does not crash', async () => {
+    let releasePages!: () => void;
+    const gate = new Promise<void>((r) => {
+      releasePages = r;
+    });
+    const slow: SourceAdapter = {
+      ...fakeAdapter({ current: [ch(1)] }),
+      id: 'slow',
+      hosts: ['slow.test'],
+      getSeries: async (url) => ({ title: 'Heart Aching', url, altTitles: [], chapters: [ch(1)] }),
+      getChapterPages: async () => {
+        await gate;
+        throw new Error('source gone');
+      },
+    };
+    const t = setup({ extra: [slow] });
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'slow', seriesUrl: 'https://slow.test/s/heart', checkIntervalMin: 60 });
+    const [c1] = t.links.chapters(link.id);
+
+    t.pipeline.enqueue([c1!.id]);
+    await t.app.inject({ method: 'DELETE', url: `/api/links/${link.id}` });
+    releasePages();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(await waitForJobs(t.pipeline)).toEqual([]);
+  });
+
   it('fails a queued job whose source no longer exists instead of re-running it forever', async () => {
     const t = setup();
     close = () => t.app.close();
@@ -492,5 +519,70 @@ describe('tracked links', () => {
     await waitForJobs(t.pipeline);
     const file = t.pipeline.file(job!.id);
     expect(file?.name).toContain('Chapter 0.5.zip');
+  });
+
+  it('lists all download jobs beyond 500 so early ready ZIPs are not hidden behind queued chapters', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
+    const now = Date.now();
+    const insChap = t.db.prepare(
+      `INSERT INTO source_chapters (link_id, number, label, url, locked, state, first_seen_at) VALUES (?, ?, ?, ?, 0, ?, ?)`,
+    );
+    const insJob = t.db.prepare(
+      `INSERT INTO upload_jobs (link_id, chapter_id, state, progress, total, dry_run, prev_chapter_state, created_at, updated_at)
+       VALUES (?, ?, ?, 0, 1, 0, 'known', ?, ?)`,
+    );
+    t.db.exec('BEGIN');
+    for (let i = 10; i < 560; i++) {
+      const state = i < 20 ? 'done' : 'queued';
+      const chapRes = insChap.run(link.id, i, `Chapter ${i}`, `https://fake.test/ch/${i}`, state === 'done' ? 'downloaded' : 'queued', now);
+      insJob.run(link.id, Number(chapRes.lastInsertRowid), state, now, now);
+    }
+    t.db.exec('COMMIT');
+
+    const res = await t.app.inject({ method: 'GET', url: '/api/downloads' });
+    expect(res.statusCode).toBe(200);
+    const jobs = res.json() as Array<{ state: string }>;
+    expect(jobs).toHaveLength(550);
+    expect(jobs.filter((j) => j.state === 'done')).toHaveLength(10);
+    expect(jobs.filter((j) => j.state === 'queued')).toHaveLength(540);
+    expect(t.pipeline.list({ limit: 5 })).toHaveLength(5);
+  });
+
+  it('clears finished download jobs when chapters are marked skipped', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
+    const [c1] = t.links.chapters(link.id);
+    t.pipeline.enqueue([c1!.id]);
+    await waitForJobs(t.pipeline);
+    expect(t.pipeline.list({ linkId: link.id })).toHaveLength(1);
+
+    const res = await t.app.inject({ method: 'POST', url: '/api/chapters/state', payload: { chapterIds: [c1!.id], state: 'skipped' } });
+    expect(res.statusCode).toBe(200);
+    expect(t.pipeline.list({ linkId: link.id })).toHaveLength(0);
+  });
+
+  it('ranks possible sources with close name and close chapter count at the top and errors at the bottom', () => {
+    const base: Omit<SourceMatch, 'sourceId' | 'sourceName' | 'seriesUrl' | 'score' | 'chapterCount' | 'error'> = {
+      sourceKind: 'aggregator',
+      title: 'Test Series',
+      cover: null,
+      latestChapter: null,
+      fetchedAt: 1,
+    };
+    const matches: SourceMatch[] = [
+      { ...base, sourceId: 's1', sourceName: 'Broken', seriesUrl: 'https://a/1', score: 1, chapterCount: null, error: 'timeout' },
+      { ...base, sourceId: 's2', sourceName: 'TooFew', seriesUrl: 'https://a/2', score: 1, chapterCount: 2, error: null },
+      { ...base, sourceId: 's3', sourceName: 'WayTooMany', seriesUrl: 'https://a/3', score: 0.9, chapterCount: 400, error: null },
+      { ...base, sourceId: 's4', sourceName: 'BestFit', seriesUrl: 'https://a/4', score: 0.96, chapterCount: 98, error: null },
+    ];
+    const ranked = rankSourceMatches(matches, 100);
+    expect(ranked.map((m) => m.sourceId)).toEqual(['s4', 's3', 's2', 's1']);
+
+    const rankedNoMb = rankSourceMatches(matches, null);
+    expect(rankedNoMb.at(-1)?.sourceId).toBe('s1');
+    expect(rankedNoMb[0]?.sourceId).toBe('s4');
   });
 });

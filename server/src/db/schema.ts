@@ -139,4 +139,9 @@ export const migrations: string[] = [
   DELETE FROM source_matches WHERE source_id IN ('senmanga', 'mgread');
   DELETE FROM source_settings WHERE source_id IN ('senmanga', 'mgread');
   `,
+  `
+  -- Job lookups by chapter/link run on every progress event and queue pump.
+  CREATE INDEX IF NOT EXISTS upload_jobs_chapter ON upload_jobs(chapter_id, state);
+  CREATE INDEX IF NOT EXISTS upload_jobs_link ON upload_jobs(link_id, state);
+  `,
 ];

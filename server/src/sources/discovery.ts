@@ -1,4 +1,4 @@
-import type { ContentRequest, MangaBaka, SourceMatch } from '@atsusync/shared';
+import { rankSourceMatches, type ContentRequest, type MangaBaka, type SourceMatch } from '@atsusync/shared';
 import type { Db } from '../db/client.ts';
 import { tx } from '../db/client.ts';
 import { events } from '../events.ts';
@@ -34,7 +34,7 @@ export class Discovery {
     private sources: SourceRegistry,
   ) {}
 
-  cached(requestId: string): SourceMatch[] {
+  cached(requestId: string, expectedChapters?: number | null): SourceMatch[] {
     const rows = this.db
       .prepare('SELECT * FROM source_matches WHERE request_id = ? ORDER BY score DESC')
       .all(requestId) as unknown as MatchRow[];
@@ -43,7 +43,10 @@ export class Discovery {
     if (stale.length) {
       for (const r of stale) this.db.prepare('DELETE FROM source_matches WHERE request_id = ? AND source_id = ? AND series_url = ?').run(r.request_id, r.source_id, r.series_url);
     }
-    return rows.filter((r) => !stale.includes(r)).map((r) => this.rowToMatch(r));
+    return rankSourceMatches(
+      rows.filter((r) => !stale.includes(r)).map((r) => this.rowToMatch(r)),
+      expectedChapters,
+    );
   }
 
   async resolveMangaBaka(req: ContentRequest): Promise<MangaBaka | null> {
@@ -76,6 +79,7 @@ export class Discovery {
       requestId: req.id,
       sources: adapters.map((a) => ({ id: a.id, name: a.name })),
     });
+    let matchCount = 0;
     try {
       const results = await Promise.all(
         adapters.map(async (a) => {
@@ -94,13 +98,19 @@ export class Discovery {
         }),
       );
       const rows = results.flat().map((m) => ({ ...m, request_id: req.id }));
+      matchCount = rows.length;
       tx(this.db, () => {
         this.db.prepare('DELETE FROM source_matches WHERE request_id = ?').run(req.id);
         for (const r of rows) this.insert(r);
       });
-      return this.cached(req.id);
+      return this.cached(req.id, mb?.totalChapters ?? null);
     } finally {
-      events.emitEvent({ type: 'discovery_done', requestId: req.id });
+      events.emitEvent({
+        type: 'discovery_done',
+        requestId: req.id,
+        seriesTitle: req.title,
+        matchCount,
+      });
     }
   }
 

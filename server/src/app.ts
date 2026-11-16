@@ -128,7 +128,7 @@ export function buildApp(opts: AppOptions) {
     if (post?.id && post.createdAt) requests.upsertPost(post);
     const r = (req.params.id.startsWith('atsu:') ? requests.findByMangaId(req.params.id.slice(5)) : null) ?? mustRequest(req.params.id);
     const mangabaka = r.mangabakaId ? await getMangaBakaSeries(r.mangabakaId).catch(() => null) : null;
-    return { request: r, mangabaka, matches: discovery.cached(r.id), links: links.list({ requestId: r.id }) };
+    return { request: r, mangabaka, matches: discovery.cached(r.id, mangabaka?.totalChapters ?? null), links: links.list({ requestId: r.id }) };
   });
   app.patch<{ Params: { id: string }; Body: { title?: string | null } }>('/api/requests/:id', async (req) => {
     const r = mustRequest(req.params.id);
@@ -137,17 +137,17 @@ export function buildApp(opts: AppOptions) {
     }
     return mustRequest(r.id);
   });
-  app.post<{ Body: { sourceId?: string | null; mangaId?: string | null; title?: string | null } }>('/api/uploads/resolve', async (req) => {
+  app.post<{ Body: { sourceId?: string | null; mangaId?: string | null; mangaBakaId?: string | null; title?: string | null } }>('/api/uploads/resolve', async (req) => {
     const sourceId = req.body?.sourceId?.trim() || null;
     let mangaId = req.body?.mangaId?.trim() || null;
-    let mangaBakaId: string | null = null;
+    let mangaBakaId = req.body?.mangaBakaId?.trim() || null;
     let title = req.body?.title?.trim() || null;
 
     if (sourceId && !mangaId) {
       const fromWorkspace = await atsu.resolveUploadSource(sourceId).catch(() => null);
       if (fromWorkspace) {
         mangaId = fromWorkspace.mangaId;
-        mangaBakaId = fromWorkspace.mangaBakaId;
+        mangaBakaId = mangaBakaId ?? fromWorkspace.mangaBakaId;
         title = title ?? fromWorkspace.title;
       }
     }
@@ -177,7 +177,7 @@ export function buildApp(opts: AppOptions) {
     return {
       request: r,
       mangabaka,
-      matches: discovery.cached(r.id),
+      matches: discovery.cached(r.id, mangabaka?.totalChapters ?? null),
       links: links.list({ requestId: r.id }),
       resolved: { mangaId: mangaId ?? r.atsuMangaId, mangaBakaId: mangaBakaId ?? r.mangabakaId, title: r.title },
     };
@@ -415,7 +415,7 @@ export function buildApp(opts: AppOptions) {
   });
   app.post<{ Body: { chapterIds: number[]; state: 'skipped' | 'known' | 'pending' | 'uploaded' } }>('/api/chapters/state', async (req) => {
     links.setChapterState(req.body.chapterIds, req.body.state);
-    if (req.body.state === 'uploaded') {
+    if (req.body.state === 'uploaded' || req.body.state === 'skipped') {
       pipeline.clearForChapters(req.body.chapterIds);
     }
     return { ok: true };
