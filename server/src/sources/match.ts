@@ -1,9 +1,15 @@
 // Title matching between a request (title + tracker alt titles) and source search hits.
 
+const TAG_SUFFIX = /\s*[\[(](?:official|colored|full color|uncensored|raw|manga|manhwa|manhua|webtoon|novel|light novel|ln|wn|digital)[\])]\s*/gi;
+
+export function stripReleaseTags(s: string): string {
+  return s.replace(TAG_SUFFIX, ' ').replace(/\s+/g, ' ').trim();
+}
+
 export function normalizeTitle(s: string): string {
-  return s
+  return stripReleaseTags(s)
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/&/g, ' and ')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
@@ -12,11 +18,7 @@ export function normalizeTitle(s: string): string {
     .trim();
 }
 
-/** Dice coefficient over character bigrams, 0..1. */
-export function similarity(a: string, b: string): number {
-  const x = normalizeTitle(a).replace(/ /g, '');
-  const y = normalizeTitle(b).replace(/ /g, '');
-  if (!x || !y) return 0;
+function bigramDice(x: string, y: string): number {
   if (x === y) return 1;
   if (x.length < 2 || y.length < 2) return 0;
   const grams = new Map<string, number>();
@@ -36,6 +38,39 @@ export function similarity(a: string, b: string): number {
   return (2 * overlap) / (x.length - 1 + (y.length - 1));
 }
 
+function tokenJaccard(na: string, nb: string): number {
+  const ta = new Set(na.split(' ').filter(Boolean));
+  const tb = new Set(nb.split(' ').filter(Boolean));
+  if (!ta.size || !tb.size) return 0;
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter++;
+  const union = ta.size + tb.size - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function extractNumbers(s: string): string {
+  return (s.match(/\d+/g) ?? []).join(',');
+}
+
+/** Blended bigram Dice + token Jaccard similarity, 0..1, with sequel-number mismatch penalty. */
+export function similarity(a: string, b: string): number {
+  const na = normalizeTitle(a);
+  const nb = normalizeTitle(b);
+  const x = na.replace(/ /g, '');
+  const y = nb.replace(/ /g, '');
+  if (!x || !y) return 0;
+  if (x === y) return 1;
+
+  const dice = bigramDice(x, y);
+  const jaccard = tokenJaccard(na, nb);
+  let score = 0.6 * dice + 0.4 * jaccard;
+
+  if (extractNumbers(na) !== extractNumbers(nb)) {
+    score *= 0.75;
+  }
+  return score;
+}
+
 /** Best similarity between any wanted title and any of the candidate's titles. */
 export function bestScore(wanted: string[], candidate: string[]): number {
   let best = 0;
@@ -43,16 +78,17 @@ export function bestScore(wanted: string[], candidate: string[]): number {
   return Math.round(best * 100) / 100;
 }
 
-/** Titles worth searching with: dedupe by normalized form, prefer Latin-script titles first. */
-export function searchQueries(titles: string[], max = 3): string[] {
+/** Titles worth searching with: dedupe by normalized form, strip release tags, prefer Latin-script titles first. */
+export function searchQueries(titles: string[], max = 4): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   const latinFirst = [...titles].sort((a, b) => Number(isLatin(b)) - Number(isLatin(a)));
-  for (const t of latinFirst) {
-    const n = normalizeTitle(t);
+  for (const raw of latinFirst) {
+    const cleaned = stripReleaseTags(raw);
+    const n = normalizeTitle(cleaned);
     if (!n || seen.has(n)) continue;
     seen.add(n);
-    out.push(t);
+    out.push(cleaned);
     if (out.length >= max) break;
   }
   return out;

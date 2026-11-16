@@ -44,7 +44,7 @@ export async function searchMangaBakaSeries(
 
   let best: { series: MangaBakaSeries; score: number } | null = null;
   for (const q of queries) {
-    const res = await fetchImpl(`${API}/series/search?q=${encodeURIComponent(q)}`, {
+    const res = await fetchImpl(`${API}/series/search?q=${encodeURIComponent(q)}&limit=10`, {
       headers: { accept: 'application/json', 'user-agent': USER_AGENT },
     });
     if (!res.ok) continue;
@@ -101,10 +101,20 @@ function parseTotalChapters(raw: unknown): number | null {
 export function parseMangaBaka(data: any): MangaBakaSeries | null {
   if (!data || typeof data !== 'object') return null;
   const titles = new Set<string>();
-  for (const t of [data.title, data.romanized_title, data.native_title]) if (typeof t === 'string' && t) titles.add(t);
-  for (const group of Object.values<any>(data.secondary_titles ?? {})) {
-    if (Array.isArray(group)) for (const t of group) if (typeof t?.title === 'string') titles.add(t.title);
+  const add = (t: unknown) => {
+    if (typeof t === 'string' && t.trim()) titles.add(t.trim());
+  };
+  add(data.title);
+  add(data.romanized_title);
+  const secondary = data.secondary_titles ?? {};
+  // Prefer English and romanized secondary titles first so source searches use them before native scripts.
+  for (const lang of ['en', 'ja-ro', 'ko-ro', 'zh-ro']) {
+    if (Array.isArray(secondary[lang])) for (const t of secondary[lang]) add(t?.title);
   }
+  for (const group of Object.values<any>(secondary)) {
+    if (Array.isArray(group)) for (const t of group) add(t?.title);
+  }
+  add(data.native_title);
   const id = Number(data.id);
   const canonical = typeof data.canonical_url === 'string' && data.canonical_url ? data.canonical_url : null;
   return {

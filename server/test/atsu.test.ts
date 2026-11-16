@@ -45,7 +45,7 @@ describe('content request parsing', () => {
       total_chapters: '125',
       canonical_url: 'https://mangabaka.org/manhwa/36039/The-Sound-of-Your-Voice',
     })!;
-    expect(mb.titles).toEqual(['The Sound of Your Voice', 'Moksorireul Deullyeojuseyo', '목소리를 들려주세요', '恋上你的声音']);
+    expect(mb.titles).toEqual(['The Sound of Your Voice', 'Moksorireul Deullyeojuseyo', '恋上你的声音', '목소리를 들려주세요']);
     expect(mb.totalChapters).toBe(125);
     expect(mb.status).toBe('completed');
     expect(mb.type).toBe('manhwa');
@@ -158,10 +158,17 @@ describe('title matching', () => {
   it('scores close titles high and unrelated ones low', () => {
     expect(bestScore(['Heart Aching'], ['Heart-Aching'])).toBe(1);
     expect(bestScore(['The Sound of Your Voice'], ['Sound of Your Voice'])).toBe(1);
+    expect(bestScore(['Solo Leveling (Official)'], ['Solo Leveling'])).toBe(1);
     expect(bestScore(['Heart Aching'], ['Solo Leveling'])).toBeLessThan(0.3);
+    expect(bestScore(['The Villainess Turns the Hourglass'], ['The Villainess Lives Again'])).toBeLessThan(0.62);
+    expect(bestScore(['Dandadan'], ['Dandadan 2'])).toBeLessThan(0.85);
   });
 
-  it('dedupes search queries and prefers latin titles', () => {
-    expect(searchQueries(['아리도록', 'Heart-Aching', 'heart aching', 'Aching'])).toEqual(['Heart-Aching', 'Aching', '아리도록']);
+  it('dedupes search queries, strips release tags, and prefers latin titles', () => {
+    expect(searchQueries(['아리도록', 'Heart-Aching (Official)', 'heart aching', 'Aching'])).toEqual([
+      'Heart-Aching',
+      'Aching',
+      '아리도록',
+    ]);
   });
 });

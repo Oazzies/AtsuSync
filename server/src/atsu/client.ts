@@ -228,6 +228,56 @@ export class AtsuClient {
     return this.json<unknown>('/api/uploads');
   }
 
+  /** Find a source entry by its UUID in the user's upload workspace (/api/uploads). */
+  async resolveUploadSource(sourceId: string): Promise<{ mangaId: string | null; mangaBakaId: string | null; title: string | null } | null> {
+    if (!this.getCookie().trim()) return null;
+    const workspace = await this.getUploadWorkspace().catch(() => null);
+    if (!workspace || typeof workspace !== 'object') return null;
+
+    const visit = (node: unknown, parentSeries?: Record<string, unknown>): { mangaId: string | null; mangaBakaId: string | null; title: string | null } | null => {
+      if (!node || typeof node !== 'object') return null;
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          const hit = visit(item, parentSeries);
+          if (hit) return hit;
+        }
+        return null;
+      }
+      const obj = node as Record<string, unknown>;
+      const seriesObj = (obj.series && typeof obj.series === 'object' ? (obj.series as Record<string, unknown>) : undefined) ?? (obj.manga && typeof obj.manga === 'object' ? (obj.manga as Record<string, unknown>) : undefined) ?? parentSeries;
+      if (obj.id === sourceId || obj.sourceId === sourceId) {
+        const mangaId =
+          typeof obj.mangaId === 'string' && obj.mangaId
+            ? obj.mangaId
+            : typeof seriesObj?.mangaId === 'string' && seriesObj.mangaId
+              ? seriesObj.mangaId
+              : typeof seriesObj?.id === 'string' && seriesObj.id !== sourceId
+                ? seriesObj.id
+                : null;
+        const mbRaw = obj.mangaBakaId ?? seriesObj?.mangaBakaId;
+        const mangaBakaId = mbRaw !== undefined && mbRaw !== null && String(mbRaw) !== '' ? String(mbRaw) : null;
+        const title =
+          typeof obj.seriesTitle === 'string' && obj.seriesTitle
+            ? obj.seriesTitle
+            : typeof seriesObj?.title === 'string' && seriesObj.title
+              ? seriesObj.title
+              : typeof obj.title === 'string' && obj.title
+                ? obj.title
+                : null;
+        return { mangaId, mangaBakaId, title };
+      }
+      for (const val of Object.values(obj)) {
+        if (val && typeof val === 'object') {
+          const hit = visit(val, seriesObj);
+          if (hit) return hit;
+        }
+      }
+      return null;
+    };
+
+    return visit(workspace);
+  }
+
   searchSeries(q: string) {
     return this.json<unknown>(`/api/uploads/series/search?q=${encodeURIComponent(q)}`);
   }

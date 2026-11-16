@@ -86,6 +86,7 @@ interface RequestRow {
   atsu_manga_id: string | null;
   alt_titles_json: string | null;
   cover: string | null;
+  custom_title: string | null;
   link_count?: number;
 }
 
@@ -94,7 +95,8 @@ export const atsuSeriesRequestId = (mangaId: string) => `atsu:${mangaId}`;
 function rowToRequest(r: RequestRow): ContentRequest {
   return {
     id: r.id,
-    title: r.title,
+    title: r.custom_title || r.title,
+    customTitle: r.custom_title ?? null,
     content: r.content,
     url: r.atsu_manga_id ? `${ATSU_BASE}/manga/${r.atsu_manga_id}` : postUrl(r.id),
     authorName: r.author_name,
@@ -170,6 +172,42 @@ export class RequestsRepo {
 
   setMangaBakaId(id: string, mangabakaId: string) {
     this.db.prepare('UPDATE requests SET mangabaka_id = ? WHERE id = ?').run(mangabakaId, id);
+  }
+
+  setCustomTitle(id: string, title: string | null) {
+    const trimmed = title?.trim() || null;
+    this.db.prepare('UPDATE requests SET custom_title = ? WHERE id = ?').run(trimmed, id);
+  }
+
+  upsertMangaBakaSeries(mangaBakaId: string, title: string): ContentRequest {
+    const id = `mb:${mangaBakaId}`;
+    this.db
+      .prepare(
+        `INSERT INTO requests (id, title, content, author_name, tags_json, status, kind, trackers_json, mangabaka_id,
+           comment_count, score, created_at, synced_at)
+         VALUES (?, ?, '', NULL, '[]', 'open', NULL, '[]', ?, 0, 0, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET title = excluded.title, synced_at = excluded.synced_at`,
+      )
+      .run(id, title, mangaBakaId, Date.now(), Date.now());
+    return this.get(id)!;
+  }
+
+  findByMangaId(mangaId: string): ContentRequest | null {
+    const byId = this.get(atsuSeriesRequestId(mangaId));
+    if (byId) return byId;
+    const byCol = this.db.prepare('SELECT id FROM requests WHERE atsu_manga_id = ? LIMIT 1').get(mangaId) as { id: string } | undefined;
+    if (byCol) return this.get(byCol.id);
+    const byLink = this.db.prepare('SELECT request_id FROM links WHERE atsu_manga_id = ? LIMIT 1').get(mangaId) as { request_id: string } | undefined;
+    if (byLink) return this.get(byLink.request_id);
+    const byPresence = this.db
+      .prepare("SELECT id FROM requests WHERE json_extract(presence_json, '$.verdict') = 'on_atsu' AND json_extract(presence_json, '$.match.mangaId') = ? LIMIT 1")
+      .get(mangaId) as { id: string } | undefined;
+    return byPresence ? this.get(byPresence.id) : null;
+  }
+
+  findByMangaBakaId(mangaBakaId: string): ContentRequest | null {
+    const row = this.db.prepare('SELECT id FROM requests WHERE mangabaka_id = ? ORDER BY created_at DESC LIMIT 1').get(mangaBakaId) as { id: string } | undefined;
+    return row ? this.get(row.id) : null;
   }
 
   sectionId(id: string): string | null {
