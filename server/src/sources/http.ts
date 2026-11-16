@@ -10,10 +10,13 @@ import { BlockedError, ROBOTS_AGENT, USER_AGENT, isBotChallenge, retryAfterMs, s
 import { ALLOW_ALL, DISALLOW_ALL, isAllowed, parseRobots, type RobotsRules } from './robots.ts';
 
 interface HostLimiter {
+  baseIntervalMs: number;
+  baseConcurrency: number;
   intervalMs: number;
   concurrency: number;
   active: number;
   nextAt: number;
+  successStreak: number;
   waiters: (() => void)[];
 }
 
@@ -34,15 +37,22 @@ export interface FetchOptions {
 }
 
 const DEFAULT_LIMIT = { rpm: 30, concurrency: 1 };
-/** Images are plain CDN files; a handful in parallel is what any browser does. */
-const ASSET_LIMIT = { rpm: 900, concurrency: 6 };
+/** Images are plain CDN files; load them with browser-like parallelism. */
+const ASSET_LIMIT = { rpm: 3600, concurrency: 16 };
+/** Local bridges (e.g. Suwayomi) need no artificial rate-limit sleep. */
+const LOOPBACK_ASSET_LIMIT = { rpm: 60_000, concurrency: 24 };
 const CACHE_MAX = 500;
 const ROBOTS_TTL = 24 * 60 * 60_000;
+const ROBOTS_TIMEOUT_MS = 5_000;
 const MAX_RETRY_WAIT = 5 * 60_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+const isLoopbackHost = (host: string) =>
+  host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
+
 export class SourceHttp {
-  private limiters = new Map<string, HostLimiter>();
+  private apiLimiters = new Map<string, HostLimiter>();
+  private assetLimiters = new Map<string, HostLimiter>();
   private cache = new Map<string, { at: number; ttl: number; body: string }>();
   private robots = new Map<string, { at: number; rules: Promise<RobotsRules> }>();
   /** Identical in-flight text requests share one network call. */
@@ -54,7 +64,7 @@ export class SourceHttp {
   ) {}
 
   configureHost(host: string, rateLimit: { rpm: number; concurrency: number }) {
-    this.limiters.set(host, newLimiter(rateLimit));
+    this.apiLimiters.set(host, newLimiter(rateLimit));
   }
 
   async text(url: string, opts: FetchOptions = {}): Promise<string> {
@@ -113,7 +123,7 @@ export class SourceHttp {
   async assertAllowed(url: string) {
     if (!this.respectRobots) return;
     const u = new URL(url);
-    if (u.pathname === '/robots.txt') return;
+    if (isLoopbackHost(u.hostname) || u.pathname === '/robots.txt') return;
     const rules = await this.robotsFor(u);
     if (!isAllowed(rules, u.pathname + u.search)) {
       throw new BlockedError(`${u.hostname}'s robots.txt doesn't allow fetching ${u.pathname}`);
@@ -125,7 +135,9 @@ export class SourceHttp {
     if (!opts.ignoreRobots) await this.assertAllowed(url);
     opts.signal?.throwIfAborted();
     const host = new URL(url).hostname;
-    const release = await this.acquire(host, opts.asset);
+    const isLocal = isLoopbackHost(host);
+    const method = opts.method ?? 'GET';
+    const release = await this.acquire(host, opts.asset, opts.signal);
     let res: Response;
     try {
       opts.signal?.throwIfAborted();
@@ -134,12 +146,17 @@ export class SourceHttp {
       const signal =
         opts.signal && timeoutSignal ? AbortSignal.any([opts.signal, timeoutSignal]) : (opts.signal ?? timeoutSignal);
       res = await this.fetchImpl(url, {
-        method: opts.method ?? 'GET',
+        method,
         body: opts.body,
         headers: { 'user-agent': USER_AGENT, ...opts.headers },
         redirect: 'follow',
         signal,
       });
+    } catch (err) {
+      if (opts.signal?.aborted || attempt >= 3 || (method !== 'GET' && method !== 'HEAD')) throw err;
+      const wait = isLocal ? 200 : 500 * 2 ** attempt;
+      await sleepOrAbort(wait, opts.signal);
+      return this.fetch(url, opts, attempt + 1);
     } finally {
       release();
     }
@@ -150,20 +167,32 @@ export class SourceHttp {
         throw new BlockedError(`${host} shows a bot challenge to automated clients; AtsuSync won't try to get past it`);
       }
     }
-    const isLocal = host === '127.0.0.1' || host === 'localhost' || host === '::1';
     const maxAttempts = isLocal && res.status >= 500 && res.status !== 503 ? 1 : 3;
     if ((res.status === 429 || res.status === 503 || res.status >= 500) && attempt < maxAttempts) {
       const wait = retryAfterMs(res) ?? (isLocal ? 500 : 2000 * 2 ** attempt);
       if (wait > MAX_RETRY_WAIT) throw new Error(`${host} asked us to wait ${Math.round(wait / 60_000)} min; try later`);
       if (res.status === 429 || res.status === 503) {
-        // Slow down for everyone talking to this host, not just this request.
+        // Slow down for everyone talking to this host and adaptively back off concurrency/spacing.
         const l = this.limiterFor(host, opts.asset);
         l.nextAt = Math.max(l.nextAt, Date.now() + wait);
+        l.successStreak = 0;
+        l.concurrency = Math.max(1, Math.floor(l.concurrency / 2));
+        l.intervalMs = Math.min(10_000, Math.max(l.intervalMs * 2, 250));
       }
       await sleepOrAbort(wait, opts.signal);
       return this.fetch(url, opts, attempt + 1);
     }
-    if (!res.ok) throw new Error(`${opts.method ?? 'GET'} ${url} → ${res.status}`);
+    if (!res.ok) throw new Error(`${method} ${url} → ${res.status}`);
+
+    const l = this.limiterFor(host, opts.asset);
+    if (l.concurrency < l.baseConcurrency || l.intervalMs > l.baseIntervalMs) {
+      l.successStreak++;
+      if (l.successStreak >= 16) {
+        l.successStreak = 0;
+        l.concurrency = Math.min(l.baseConcurrency, l.concurrency + 1);
+        l.intervalMs = Math.max(l.baseIntervalMs, Math.floor(l.intervalMs * 0.75));
+      }
+    }
     return res;
   }
 
@@ -184,7 +213,7 @@ export class SourceHttp {
       res = await this.fetchImpl(`${origin}/robots.txt`, {
         headers: { 'user-agent': USER_AGENT },
         redirect: 'follow',
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(ROBOTS_TIMEOUT_MS),
       });
     } catch {
       return ALLOW_ALL; // unreachable robots.txt: nothing to obey; the real request will fail anyway
@@ -198,36 +227,45 @@ export class SourceHttp {
     if (isBotChallenge(res, body) || /<html/i.test(body.slice(0, 200))) return ALLOW_ALL;
     const rules = parseRobots(body, ROBOTS_AGENT);
     if (rules.crawlDelaySec) {
-      // An explicit Crawl-delay overrides the fast image path too.
-      for (const asset of [false, true]) {
-        const l = this.limiterFor(host, asset);
-        l.intervalMs = Math.max(l.intervalMs, rules.crawlDelaySec * 1000);
-        if (asset) l.concurrency = 1;
-      }
+      // Honour Crawl-delay for HTML/API crawling, but keep static image asset fetches fast.
+      const l = this.limiterFor(host, false);
+      l.baseIntervalMs = Math.max(l.baseIntervalMs, rules.crawlDelaySec * 1000);
+      l.intervalMs = Math.max(l.intervalMs, rules.crawlDelaySec * 1000);
     }
     return rules;
   }
 
   private limiterFor(host: string, asset = false): HostLimiter {
     if (asset) {
-      const key = `asset:${host}`;
-      let l = this.limiters.get(key);
-      if (!l) this.limiters.set(key, (l = newLimiter(ASSET_LIMIT)));
+      let l = this.assetLimiters.get(host);
+      if (!l) {
+        l = newLimiter(isLoopbackHost(host) ? LOOPBACK_ASSET_LIMIT : ASSET_LIMIT);
+        this.assetLimiters.set(host, l);
+      }
       return l;
     }
-    for (const [h, l] of this.limiters) if (host === h || host.endsWith(`.${h}`)) return l;
+    for (const [h, l] of this.apiLimiters) if (host === h || host.endsWith(`.${h}`)) return l;
     const l = newLimiter(DEFAULT_LIMIT);
-    this.limiters.set(host, l);
+    this.apiLimiters.set(host, l);
     return l;
   }
 
-  private async acquire(host: string, asset = false): Promise<() => void> {
+  private async acquire(host: string, asset = false, signal?: AbortSignal): Promise<() => void> {
+    signal?.throwIfAborted();
     const l = this.limiterFor(host, asset);
-    while (l.active >= l.concurrency) await new Promise<void>((r) => l.waiters.push(r));
+    while (l.active >= l.concurrency) {
+      await waitForSlot(l, signal);
+    }
     l.active++;
-    const wait = l.nextAt - Date.now();
-    l.nextAt = Math.max(Date.now(), l.nextAt) + l.intervalMs;
-    if (wait > 0) await sleep(wait);
+    try {
+      const wait = l.nextAt - Date.now();
+      l.nextAt = Math.max(Date.now(), l.nextAt) + l.intervalMs;
+      if (wait > 0) await sleepOrAbort(wait, signal);
+    } catch (err) {
+      l.active--;
+      l.waiters.shift()?.();
+      throw err;
+    }
     return () => {
       l.active--;
       l.waiters.shift()?.();
@@ -235,13 +273,38 @@ export class SourceHttp {
   }
 }
 
-const newLimiter = (r: { rpm: number; concurrency: number }): HostLimiter => ({
-  intervalMs: Math.ceil(60_000 / Math.max(1, r.rpm)),
-  concurrency: Math.max(1, r.concurrency),
-  active: 0,
-  nextAt: 0,
-  waiters: [],
-});
+const newLimiter = (r: { rpm: number; concurrency: number }): HostLimiter => {
+  const intervalMs = r.rpm >= 60_000 ? 0 : Math.ceil(60_000 / Math.max(1, r.rpm));
+  const concurrency = Math.max(1, r.concurrency);
+  return {
+    baseIntervalMs: intervalMs,
+    baseConcurrency: concurrency,
+    intervalMs,
+    concurrency,
+    active: 0,
+    nextAt: 0,
+    successStreak: 0,
+    waiters: [],
+  };
+};
+
+function waitForSlot(l: HostLimiter, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise<void>((r) => l.waiters.push(r));
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const wake = () => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    };
+    const onAbort = () => {
+      const idx = l.waiters.indexOf(wake);
+      if (idx !== -1) l.waiters.splice(idx, 1);
+      reject(signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError'));
+    };
+    l.waiters.push(wake);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 async function sleepOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (!signal) {

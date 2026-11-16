@@ -51,6 +51,50 @@ describe('SourceHttp politeness', () => {
     expect(seen.every((s) => s.ua === USER_AGENT)).toBe(true);
     expect(seen.filter((s) => s.url.includes('/search'))).toEqual([]);
   });
+
+  it('keeps static image asset downloads parallel and fast even when robots.txt specifies Crawl-delay', async () => {
+    let inflight = 0;
+    let maxInflight = 0;
+    const fetchImpl = (async (url: string) => {
+      if (url.endsWith('/robots.txt')) return new Response('User-agent: *\nCrawl-delay: 5\n');
+      inflight++;
+      maxInflight = Math.max(maxInflight, inflight);
+      await new Promise((r) => setTimeout(r, 25));
+      inflight--;
+      return new Response(new Uint8Array([1, 2, 3, 4]));
+    }) as unknown as typeof fetch;
+    const http = new SourceHttp(fetchImpl);
+    http.configureHost('cdn.test', { rpm: 6000, concurrency: 1 });
+
+    const start = Date.now();
+    await Promise.all(Array.from({ length: 8 }, (_, i) => http.bytes(`https://cdn.test/img/${i}.jpg`)));
+    const elapsed = Date.now() - start;
+
+    expect(maxInflight).toBeGreaterThan(1);
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  it('skips robots.txt and retries transient network errors on GET', async () => {
+    const seen: string[] = [];
+    let attempts = 0;
+    const fetchImpl = (async (url: string) => {
+      seen.push(url);
+      if (url.includes('127.0.0.1')) return new Response(new Uint8Array([9, 8, 7]));
+      if (url.endsWith('/robots.txt')) return new Response('User-agent: *\nAllow: /\n');
+      attempts++;
+      if (attempts === 1) throw new TypeError('fetch failed');
+      return new Response('recovered');
+    }) as unknown as typeof fetch;
+    const http = new SourceHttp(fetchImpl);
+    http.configureHost('flaky.test', { rpm: 6000, concurrency: 2 });
+
+    const local = await http.bytes('http://127.0.0.1:4567/page/1.jpg');
+    expect(local.bytes).toEqual(new Uint8Array([9, 8, 7]));
+    expect(seen.some((u) => u.includes('127.0.0.1/robots.txt'))).toBe(false);
+
+    expect(await http.text('https://flaky.test/ch/1')).toBe('recovered');
+    expect(attempts).toBe(2);
+  });
 });
 
 describe('upload claims in comments', () => {
