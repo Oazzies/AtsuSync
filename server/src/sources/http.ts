@@ -31,7 +31,8 @@ export interface FetchOptions {
 
 const DEFAULT_LIMIT = { rpm: 30, concurrency: 1 };
 /** Images are plain CDN files; a handful in parallel is what any browser does. */
-const ASSET_LIMIT = { rpm: 600, concurrency: 4 };
+const ASSET_LIMIT = { rpm: 900, concurrency: 6 };
+const CACHE_MAX = 500;
 const ROBOTS_TTL = 24 * 60 * 60_000;
 const MAX_RETRY_WAIT = 5 * 60_000;
 
@@ -39,6 +40,8 @@ export class SourceHttp {
   private limiters = new Map<string, HostLimiter>();
   private cache = new Map<string, { at: number; ttl: number; body: string }>();
   private robots = new Map<string, { at: number; rules: Promise<RobotsRules> }>();
+  /** Identical in-flight text requests share one network call. */
+  private inflight = new Map<string, Promise<string>>();
 
   constructor(
     private fetchImpl: typeof fetch = fetch,
@@ -53,10 +56,29 @@ export class SourceHttp {
     const key = opts.method && opts.method !== 'GET' ? `${opts.method}:${url}:${opts.body ?? ''}` : url;
     const cached = this.cache.get(key);
     if (cached && Date.now() - cached.at < cached.ttl) return cached.body;
-    const res = await this.fetch(url, opts);
-    const body = await res.text();
-    if (opts.cacheMs) this.cache.set(key, { at: Date.now(), ttl: opts.cacheMs, body });
-    return body;
+    const pending = this.inflight.get(key);
+    if (pending) return pending;
+    const p = (async () => {
+      const res = await this.fetch(url, opts);
+      const body = await res.text();
+      if (opts.cacheMs) {
+        this.cache.set(key, { at: Date.now(), ttl: opts.cacheMs, body });
+        if (this.cache.size > CACHE_MAX) this.pruneCache();
+      }
+      return body;
+    })().finally(() => this.inflight.delete(key));
+    this.inflight.set(key, p);
+    return p;
+  }
+
+  private pruneCache() {
+    const now = Date.now();
+    for (const [k, v] of this.cache) if (now - v.at >= v.ttl) this.cache.delete(k);
+    // Still too big: drop the oldest entries (Map iterates in insertion order).
+    for (const k of this.cache.keys()) {
+      if (this.cache.size <= CACHE_MAX) break;
+      this.cache.delete(k);
+    }
   }
 
   async json<T>(url: string, opts: FetchOptions = {}): Promise<T> {

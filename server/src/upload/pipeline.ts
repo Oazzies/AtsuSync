@@ -1,4 +1,5 @@
 import { mkdirSync, readdirSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import type { ChapterState, DownloadJob, JobState, SourceChapter } from '@atsusync/shared';
 import { uploadMangaBakaId } from '../atsu/requests.ts';
@@ -42,6 +43,8 @@ const JOB_SELECT = `
 
 const ACTIVE: JobState[] = ['queued', 'downloading'];
 const PAGE_PARALLELISM = 6;
+/** Progress is persisted/broadcast at most this often per job (the final value always goes through). */
+const PROGRESS_THROTTLE_MS = 200;
 
 /** Chapters built by hand from uploaded images have no page on the source site. */
 export const MANUAL_URL_PREFIX = 'manual:';
@@ -62,6 +65,9 @@ export class DownloadPipeline {
   private running = new Set<number>();
   private busyLinks = new Set<number>();
   private cancelled = new Set<number>();
+  private closed = false;
+  private lastProgress = new Map<number, number>();
+  private totals = new Map<number, number>();
 
   constructor(
     private db: Db,
@@ -75,15 +81,20 @@ export class DownloadPipeline {
     rmSync(join(dir, '.torrents'), { recursive: true, force: true });
     // Jobs interrupted by a restart go back to the queue.
     this.db.prepare(`UPDATE upload_jobs SET state = 'queued', progress = 0 WHERE state NOT IN ('queued','done','failed','cancelled')`).run();
+    // Stale finished jobs for chapters already uploaded or skipped should not linger.
+    this.db
+      .prepare(`DELETE FROM upload_jobs WHERE state = 'done' AND chapter_id IN (SELECT id FROM source_chapters WHERE state IN ('uploaded','skipped'))`)
+      .run();
   }
 
   list(opts: { linkId?: number; limit?: number } = {}): DownloadJob[] {
-    const { linkId, limit = 500 } = opts;
-    const rows = (
-      linkId === undefined
-        ? this.db.prepare(`${JOB_SELECT} ORDER BY j.id DESC LIMIT ?`).all(limit)
-        : this.db.prepare(`${JOB_SELECT} WHERE j.link_id = ? ORDER BY j.id DESC LIMIT ?`).all(linkId, limit)
-    ) as unknown as JobRow[];
+    const { linkId, limit } = opts;
+    const where = linkId === undefined ? '' : 'WHERE j.link_id = ?';
+    const cap = limit === undefined ? '' : 'LIMIT ?';
+    const args: number[] = [];
+    if (linkId !== undefined) args.push(linkId);
+    if (limit !== undefined) args.push(limit);
+    const rows = this.db.prepare(`${JOB_SELECT} ${where} ORDER BY j.id DESC ${cap}`).all(...args) as unknown as JobRow[];
     return rows.map((r) => this.toJob(r));
   }
 
@@ -197,7 +208,7 @@ export class DownloadPipeline {
       chapterId = Number(res.lastInsertRowid);
     }
 
-    const { path, size } = this.bundle(link.seriesTitle, label, input.files);
+    const { path, size } = this.bundle(link.id, link.seriesTitle, label, input.files);
     const log = [`${new Date().toISOString().slice(11, 19)} Built by hand from ${input.files.length} page(s) (${(size / 1024 / 1024).toFixed(1)} MB) at ${path}`];
     const res = this.db
       .prepare(
@@ -293,7 +304,7 @@ export class DownloadPipeline {
 
   /** Start queued jobs up to the concurrency limit. */
   pump() {
-    if (this.running.size >= this.concurrency) return;
+    if (this.closed || this.running.size >= this.concurrency) return;
     const queued = this.db.prepare(`${JOB_SELECT} WHERE j.state = 'queued' ORDER BY c.number, j.id`).all() as unknown as JobRow[];
     for (const row of queued) {
       if (this.running.size >= this.concurrency) break;
@@ -308,23 +319,34 @@ export class DownloadPipeline {
           this.running.delete(row.id);
           this.busyLinks.delete(row.link_id);
           this.cancelled.delete(row.id);
+          this.lastProgress.delete(row.id);
+          this.totals.delete(row.id);
           this.pump();
         });
     }
   }
 
-  /** Write the chapter ZIP to `<dir>/<series>/<chapter>.zip`. */
-  private bundle(seriesTitle: string, chapterLabel: string, files: PageFile[]): { path: string; size: number } {
-    const seriesDir = join(this.dir, safeName(seriesTitle));
+  /** Write the chapter ZIP to `<dir>/<linkId>-<series>/<chapter>.zip`. */
+  private bundle(linkId: number, seriesTitle: string, chapterLabel: string, files: PageFile[]): { path: string; size: number } {
+    const seriesDir = join(this.dir, `${linkId}-${safeName(seriesTitle)}`);
     mkdirSync(seriesDir, { recursive: true });
     const path = join(seriesDir, `${safeName(chapterLabel)}.zip`);
     writeFileSync(path, createZip(files));
     return { path, size: statSync(path).size };
   }
 
-  /** Write a novel chapter's ebook to `<dir>/<series>/<chapter>.<ext>`. */
-  private saveEpub(seriesTitle: string, chapterLabel: string, data: Uint8Array, ext = 'epub'): { path: string; size: number } {
-    const seriesDir = join(this.dir, safeName(seriesTitle));
+  /** Same as bundle(), without blocking the event loop while a large chapter is written. */
+  private async bundleAsync(linkId: number, seriesTitle: string, chapterLabel: string, files: PageFile[]): Promise<{ path: string; size: number }> {
+    const seriesDir = join(this.dir, `${linkId}-${safeName(seriesTitle)}`);
+    await mkdir(seriesDir, { recursive: true });
+    const path = join(seriesDir, `${safeName(chapterLabel)}.zip`);
+    await writeFile(path, createZip(files));
+    return { path, size: (await stat(path)).size };
+  }
+
+  /** Write a novel chapter's ebook to `<dir>/<linkId>-<series>/<chapter>.<ext>`. */
+  private saveEpub(linkId: number, seriesTitle: string, chapterLabel: string, data: Uint8Array, ext = 'epub'): { path: string; size: number } {
+    const seriesDir = join(this.dir, `${linkId}-${safeName(seriesTitle)}`);
     mkdirSync(seriesDir, { recursive: true });
     const path = join(seriesDir, `${safeName(chapterLabel)}.${ext}`);
     writeFileSync(path, data);
@@ -332,7 +354,7 @@ export class DownloadPipeline {
   }
 
   /** Novel sources: fetch the chapter text (plus any inline images) and write it as an EPUB. */
-  private async runNovel(id: number, adapter: SourceAdapter, chapter: SourceChapter, seriesTitle: string, checkCancel: () => void) {
+  private async runNovel(id: number, linkId: number, adapter: SourceAdapter, chapter: SourceChapter, seriesTitle: string, checkCancel: () => void) {
     if (!adapter.getChapterText) throw new Error(`${adapter.name} cannot download novel chapters`);
     this.setState(id, 'downloading', `Fetching the text of ${chapter.label} from ${adapter.name}`);
     const text = await adapter.getChapterText(chapter, this.sources.http);
@@ -359,7 +381,7 @@ export class DownloadPipeline {
     checkCancel();
     if (text.html.replace(/<[^>]+>/g, '').trim().length < 20) throw new Error(`${adapter.name} returned no text for ${chapter.label} (locked or empty?)`);
     const epub = createEpub({ seriesTitle, chapterTitle: text.title || chapter.label, bodyHtml: text.html, images });
-    const { path, size } = this.saveEpub(seriesTitle, chapter.label, epub);
+    const { path, size } = this.saveEpub(linkId, seriesTitle, chapter.label, epub);
     this.db.prepare('UPDATE upload_jobs SET file_path = ?, file_size = ? WHERE id = ?').run(path, size, id);
     this.log(id, `Saved EPUB with ${text.html.split('</p>').length - 1} paragraph(s)${images.length ? ` and ${images.length} image(s)` : ''} (${(size / 1024).toFixed(0)} KB) to ${path}`);
     this.finish(id, 'done', null);
@@ -369,7 +391,7 @@ export class DownloadPipeline {
    * Download-type sources (torrents, file hosts): the adapter fetches whole files, which come back as page
    * images (repacked into the usual ZIP) or a ready-made ebook (saved as-is).
    */
-  private async runFetched(id: number, adapter: SourceAdapter, chapter: SourceChapter, seriesTitle: string, checkCancel: () => void) {
+  private async runFetched(id: number, linkId: number, adapter: SourceAdapter, chapter: SourceChapter, seriesTitle: string, checkCancel: () => void) {
     this.setState(id, 'downloading', `Fetching ${chapter.label} from ${adapter.name}`);
     this.update(id, { total: 100, progress: 0 });
     // Remember which torrents this job touched so their files are deleted once the chapter is packed.
@@ -398,7 +420,7 @@ export class DownloadPipeline {
       checkCancel();
       if (out.type === 'ebook') {
         if (out.bytes.length < 64) throw new Error(`${adapter.name} delivered an empty ${out.ext} file`);
-        const { path, size } = this.saveEpub(seriesTitle, chapter.label, out.bytes, out.ext);
+        const { path, size } = this.saveEpub(linkId, seriesTitle, chapter.label, out.bytes, out.ext);
         this.db.prepare('UPDATE upload_jobs SET file_path = ?, file_size = ? WHERE id = ?').run(path, size, id);
         this.log(id, `Saved ${out.ext.toUpperCase()} (${(size / 1024 / 1024).toFixed(1)} MB) to ${path}`);
         this.finish(id, 'done', null);
@@ -409,7 +431,7 @@ export class DownloadPipeline {
       if (valid.length === 0) throw new Error(`No valid images in what ${adapter.name} delivered`);
       const fixed = await mergeSliverPages(valid);
       if (fixed.merged > 0) this.log(id, `Joined ${fixed.merged} thin leftover strip(s) onto the pages above them (${valid.length} → ${fixed.files.length} pages)`);
-      const { path, size } = this.bundle(seriesTitle, chapter.label, fixed.files);
+      const { path, size } = await this.bundleAsync(linkId, seriesTitle, chapter.label, fixed.files);
       this.db.prepare('UPDATE upload_jobs SET file_path = ?, file_size = ? WHERE id = ?').run(path, size, id);
       this.log(id, `Saved ${fixed.files.length} pages (${(size / 1024 / 1024).toFixed(1)} MB) to ${path}`);
       this.finish(id, 'done', null);
@@ -419,15 +441,19 @@ export class DownloadPipeline {
   }
 
   async close() {
+    this.closed = true;
     await this.torrents.destroy();
   }
 
   private async run(id: number) {
-    const job = this.get(id)!;
-    const chapter = this.links.chapter(job.chapterId)!;
-    const link = this.links.get(job.linkId)!;
+    const job = this.get(id);
+    if (!job) return;
+    const chapter = this.links.chapter(job.chapterId);
+    const link = this.links.get(job.linkId);
+    const sourceRow = this.db.prepare('SELECT source_url FROM upload_jobs WHERE id = ?').get(id) as { source_url: string | null } | undefined;
+    if (!chapter || !link || !sourceRow) return;
     // A chapter fetched from another site (see addFromSource) is resolved by its own URL's adapter.
-    const pageUrl = (this.db.prepare('SELECT source_url FROM upload_jobs WHERE id = ?').get(id) as { source_url: string | null }).source_url ?? chapter.url;
+    const pageUrl = sourceRow.source_url ?? chapter.url;
     const adapter = this.sources.forUrl(pageUrl) ?? this.sources.get(link.sourceId);
     const checkCancel = () => {
       if (this.cancelled.has(id)) throw new CancelError();
@@ -435,11 +461,11 @@ export class DownloadPipeline {
 
     try {
       if (adapter.fetchChapter) {
-        await this.runFetched(id, adapter, { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked }, link.seriesTitle, checkCancel);
+        await this.runFetched(id, link.id, adapter, { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked }, link.seriesTitle, checkCancel);
         return;
       }
       if (mediumOf(adapter) === 'novel') {
-        await this.runNovel(id, adapter, { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked }, link.seriesTitle, checkCancel);
+        await this.runNovel(id, link.id, adapter, { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked }, link.seriesTitle, checkCancel);
         return;
       }
       this.setState(id, 'downloading', `Resolving pages for ${chapter.label} from ${adapter.name}`);
@@ -496,7 +522,7 @@ export class DownloadPipeline {
       const fixed = await mergeSliverPages(files);
       if (fixed.merged > 0) this.log(id, `Joined ${fixed.merged} thin leftover strip(s) onto the pages above them (${files.length} → ${fixed.files.length} pages)`);
       files = fixed.files;
-      const { path, size } = this.bundle(link.seriesTitle, chapter.label, files);
+      const { path, size } = await this.bundleAsync(link.id, link.seriesTitle, chapter.label, files);
       this.db.prepare('UPDATE upload_jobs SET file_path = ?, file_size = ? WHERE id = ?').run(path, size, id);
       this.log(id, `Saved ${files.length} pages${skipped > 0 ? ` (${skipped} skipped)` : ''} (${(size / 1024 / 1024).toFixed(1)} MB) to ${path}`);
       this.finish(id, 'done', null);
@@ -507,8 +533,10 @@ export class DownloadPipeline {
   }
 
   private finish(id: number, state: 'done' | 'failed' | 'cancelled', error: string | null) {
-    const job = this.get(id)!;
-    const row = this.db.prepare('SELECT prev_chapter_state FROM upload_jobs WHERE id = ?').get(id) as { prev_chapter_state: ChapterState };
+    if (this.closed) return;
+    const job = this.get(id);
+    const row = this.db.prepare('SELECT prev_chapter_state FROM upload_jobs WHERE id = ?').get(id) as { prev_chapter_state: ChapterState } | undefined;
+    if (!job || !row) return;
     this.db.prepare('UPDATE upload_jobs SET state = ?, error = ?, updated_at = ? WHERE id = ?').run(state, error, Date.now(), id);
     // 'downloaded' = the ZIP is ready but not yet uploaded to Atsumaru; the user marks it uploaded themselves.
     this.links.setChapterState([job.chapterId], state === 'done' ? 'downloaded' : row.prev_chapter_state);
@@ -534,13 +562,25 @@ export class DownloadPipeline {
   }
 
   private update(id: number, patch: { progress?: number; total?: number }) {
-    if (patch.total !== undefined) this.db.prepare('UPDATE upload_jobs SET total = ? WHERE id = ?').run(patch.total, id);
-    if (patch.progress !== undefined) this.db.prepare('UPDATE upload_jobs SET progress = ?, updated_at = ? WHERE id = ?').run(patch.progress, Date.now(), id);
+    if (patch.total !== undefined) {
+      this.totals.set(id, patch.total);
+      this.db.prepare('UPDATE upload_jobs SET total = ? WHERE id = ?').run(patch.total, id);
+    }
+    if (patch.progress !== undefined) {
+      // Per-page progress would otherwise cost a write plus a joined read per page; coalesce it.
+      const now = Date.now();
+      const last = this.lastProgress.get(id);
+      const isLast = this.totals.get(id) === patch.progress;
+      if (last !== undefined && now - last < PROGRESS_THROTTLE_MS && !isLast) return;
+      this.lastProgress.set(id, now);
+      this.db.prepare('UPDATE upload_jobs SET progress = ?, updated_at = ? WHERE id = ?').run(patch.progress, now, id);
+    }
     this.emit(id);
   }
 
   private log(id: number, msg: string) {
-    const r = this.db.prepare('SELECT log_json FROM upload_jobs WHERE id = ?').get(id) as { log_json: string };
+    const r = this.db.prepare('SELECT log_json FROM upload_jobs WHERE id = ?').get(id) as { log_json: string } | undefined;
+    if (!r) return;
     const log = JSON.parse(r.log_json) as string[];
     log.push(`${new Date().toISOString().slice(11, 19)} ${msg}`);
     this.db.prepare('UPDATE upload_jobs SET log_json = ? WHERE id = ?').run(JSON.stringify(log.slice(-200)), id);
