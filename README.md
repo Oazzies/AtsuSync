@@ -10,34 +10,24 @@ Local helper + browser extension for uploading to Atsumaru [content requests](ht
 
 ## Requirements
 
-- **Node.js >= 22.5** (22 LTS or 24 LTS recommended) — `setup.cmd` can install it via `winget` on Windows if missing
-- **Git** (recommended — enables 1-click updates)
+- **Node.js >= 22.5** (on Windows, `setup.cmd` will offer to install it for you automatically if missing)
 - **Chromium browser** (Chrome, Edge, Brave, Vivaldi, etc.)
 
 ## Install
 
-1. Clone the repository (recommended so 1-click updates work) or download the ZIP from GitHub:
-   ```bash
-   git clone https://github.com/Oazzies/AtsuSync.git
-   cd AtsuSync
-   ```
-2. Run the setup script:
-   - **Windows**: double-click `setup.cmd` (or run `.\setup.cmd`)
-   - **macOS / Linux**: run `./setup.sh`
-
-   Setup installs dependencies, builds the extension into `extension/dist`, and registers the `atsusync://` protocol handler (Windows & Linux) so the browser's **Start Server** button can launch the local server automatically.
+1. Get AtsuSync from GitHub (clone with GitHub Desktop / Git for 1-click in-app updates, or click **Code → Download ZIP** and extract it).
+2. Run the setup:
+   - **Windows**: double-click **`setup.cmd`**
+   - **macOS / Linux**: run **`setup.sh`**
 3. Load the extension in your browser:
    1. Open `chrome://extensions` (or `edge://extensions` / `brave://extensions`)
    2. Enable **Developer mode**
-   3. Click **Load unpacked** and select the `extension/dist` folder inside your AtsuSync directory
-4. Open `https://atsu.moe`. Your `atsu.moe` session cookie is synced automatically by the extension (or can be pasted in **Settings**).
-
-> **Starting the server manually:** If you are on macOS or prefer starting the server yourself, run `scripts/start-server.cmd` (Windows) or `./scripts/start-server.sh` (macOS/Linux), or `npm start`.
+   3. Click **Load unpacked** and select the `extension/dist` folder inside your AtsuSync folder
+4. Open `https://atsu.moe`, open the AtsuSync side panel, and click **Start Server**. Your `atsu.moe` session is synced automatically.
 
 ## Updating
 
-- **From the extension**: open the AtsuSync side panel → **Settings → Updates** and click **Update** (available when installed via `git clone`), then click the reload icon (↻) on AtsuSync in `chrome://extensions` and restart the server.
-- **From a terminal / file explorer**: run `scripts/update.cmd` (Windows) or `./scripts/update.sh` (macOS/Linux), then reload the extension in `chrome://extensions`.
+Open the AtsuSync side panel → **Settings → Updates** and click **Update**, then click the reload icon (↻) on AtsuSync in `chrome://extensions` and restart the server.
 
 ## Optional Source Runtimes
 
