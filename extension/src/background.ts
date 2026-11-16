@@ -195,7 +195,36 @@ chrome.runtime.onStartup.addListener(() => {
   void startEventStream();
 });
 
+const sidePanelPorts = new Map<number, chrome.runtime.Port>();
+
+function broadcastSidePanelState(windowId: number, open: boolean) {
+  chrome.tabs.query({ windowId }, (tabs) => {
+    for (const tab of tabs) {
+      if (tab.id !== undefined) {
+        void chrome.tabs.sendMessage(tab.id, { type: 'sidePanelState', open }).catch(() => {});
+      }
+    }
+  });
+}
+
 chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === 'sidepanel') {
+    let windowId: number | null = null;
+    port.onMessage.addListener((msg: { type?: string; windowId?: number }) => {
+      if (msg?.type === 'init' && typeof msg.windowId === 'number') {
+        windowId = msg.windowId;
+        sidePanelPorts.set(windowId, port);
+        broadcastSidePanelState(windowId, true);
+      }
+    });
+    port.onDisconnect.addListener(() => {
+      if (windowId !== null && sidePanelPorts.get(windowId) === port) {
+        sidePanelPorts.delete(windowId);
+        broadcastSidePanelState(windowId, false);
+      }
+    });
+    return;
+  }
   if (port.name !== 'fetchFile') return;
   void startEventStream();
   port.onMessage.addListener((msg: { path?: string }) => {
@@ -213,11 +242,27 @@ chrome.runtime.onMessage.addListener((msg: BgRequest, sender, sendResponse) => {
     void syncAtsuCookies(true).then(sendResponse);
     return true;
   }
-  if (msg.type === 'openSidePanel') {
-    if (sender.tab?.windowId !== undefined) {
-      void chrome.sidePanel.open({ windowId: sender.tab.windowId });
+  if (msg.type === 'toggleSidePanel') {
+    const winId = sender.tab?.windowId;
+    if (winId !== undefined) {
+      const openPort = sidePanelPorts.get(winId);
+      if (openPort) {
+        try {
+          openPort.postMessage({ type: 'close' });
+        } catch {
+          sidePanelPorts.delete(winId);
+          void chrome.sidePanel.open({ windowId: winId });
+        }
+      } else {
+        void chrome.sidePanel.open({ windowId: winId });
+      }
     }
     sendResponse({ ok: true, data: null });
+    return false;
+  }
+  if (msg.type === 'getSidePanelState') {
+    const winId = sender.tab?.windowId;
+    sendResponse({ ok: true, data: winId !== undefined && sidePanelPorts.has(winId) });
     return false;
   }
   return false;

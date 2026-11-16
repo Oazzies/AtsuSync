@@ -91,12 +91,12 @@ async function downloadSelected() {
   }
 }
 
-async function setSelectedState(state: 'skipped' | 'uploaded') {
+async function skipSelected() {
   if (!selected.value.size) return;
   busy.value = true;
   error.value = null;
   try {
-    await api.setChapterState([...selected.value], state);
+    await api.setChapterState([...selected.value], 'skipped');
     selected.value = new Set();
     await load();
     emit('updated');
@@ -158,8 +158,7 @@ const uploadUrl = computed(() => {
 
     <div v-if="selected.size" class="as-row-wrap">
       <button class="as-btn primary" :disabled="busy" @click="downloadSelected"><Icon name="download" /> Download</button>
-      <button class="as-btn" :disabled="busy" @click="setSelectedState('skipped')">Skip</button>
-      <button class="as-btn" :disabled="busy" @click="setSelectedState('uploaded')">Mark uploaded</button>
+      <button class="as-btn" :disabled="busy" @click="skipSelected">Skip</button>
     </div>
 
     <div class="as-list">

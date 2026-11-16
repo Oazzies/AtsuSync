@@ -501,14 +501,12 @@ html, body, #app {
 .sp-btn.danger:hover:not(:disabled),
 .sp-card .sp-btn.danger:hover:not(:disabled) { background: rgba(242, 138, 138, 0.2); }
 
-/* atsu.moe's slanted-edge chip */
 .sp-badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 3px 10px 3px 7px;
-  border-radius: 999px 0 0 999px;
-  clip-path: polygon(0 0, 100% 0, calc(100% - 5px) 100%, 0 100%);
+  padding: 3px 8px;
+  border-radius: 999px;
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
@@ -575,4 +573,49 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
   .sp-body { padding: 10px; }
   .sp-cover-wrap { width: 44px; }
   .sp-user-chip { display: none; }
+}
+
+.sp-offline-screen {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.sp-start-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 260px;
+  min-height: 64px;
+  padding: 16px 24px;
+  border-radius: 14px;
+  border: 1px solid var(--accent);
+  background: color-mix(in oklab, var(--accent) 82%, black);
+  color: #fff;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+.sp-start-btn:hover:not(.starting) {
+  background: var(--accent);
+  transform: translateY(-1px);
+}
+.sp-start-btn:active:not(.starting) {
+  transform: translateY(0);
+}
+.sp-start-btn:focus-visible {
+  outline: 2px solid var(--glint);
+  outline-offset: 3px;
+}
+.sp-start-btn.starting {
+  opacity: 0.75;
+  cursor: wait;
 }

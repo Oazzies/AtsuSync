@@ -13,12 +13,15 @@ import type {
   SourceInfo,
   SourceMatch,
   SourceSeriesHit,
+  SuwayomiExtensionInfo,
+  SuwayomiStatus,
 } from '@atsusync/shared';
 
 export type BgRequest =
   | { type: 'api'; method: string; path: string; body?: unknown }
   | { type: 'syncCookies' }
-  | { type: 'openSidePanel' };
+  | { type: 'toggleSidePanel' }
+  | { type: 'getSidePanelState' };
 
 export type BgResponse<T = unknown> =
   | { ok: true; data: T }
@@ -112,8 +115,15 @@ export function syncCookiesNow(): Promise<SettingsView> {
   });
 }
 
-export function openSidePanel(): void {
-  void chrome.runtime.sendMessage({ type: 'openSidePanel' } satisfies BgRequest);
+export function toggleSidePanel(): void {
+  void chrome.runtime.sendMessage({ type: 'toggleSidePanel' } satisfies BgRequest);
+}
+
+export function getSidePanelState(): Promise<boolean> {
+  return chrome.runtime
+    .sendMessage({ type: 'getSidePanelState' } satisfies BgRequest)
+    .then((res: BgResponse<boolean>) => (res?.ok ? res.data : false))
+    .catch(() => false);
 }
 
 export const api = {
@@ -124,6 +134,15 @@ export const api = {
   syncRequests: (full = false) => call<{ added: number; updated: number }>('POST', `/requests/sync${full ? '?full=1' : ''}`),
   request: (id: string) =>
     call<{ request: ContentRequest; mangabaka: MangaBaka | null; matches: SourceMatch[]; links: Link[] }>('GET', `/requests/${id}`),
+  updateRequestTitle: (id: string, title: string | null) => call<ContentRequest>('PATCH', `/requests/${id}`, { title }),
+  resolveUpload: (params: { sourceId?: string | null; mangaId?: string | null; title?: string | null }) =>
+    call<{
+      request: ContentRequest | null;
+      mangabaka: MangaBaka | null;
+      matches: SourceMatch[];
+      links: Link[];
+      resolved: { mangaId: string | null; mangaBakaId: string | null; title: string | null };
+    }>('POST', '/uploads/resolve', params),
   addSeries: (url: string) => call<ContentRequest>('POST', '/series', { url }),
   requestAtsu: (id: string) => call<AtsuSeriesState>('GET', `/requests/${id}/atsu`),
   checkPresence: (id: string) => call<AtsuPresence>('POST', `/requests/${id}/presence`),
@@ -132,6 +151,15 @@ export const api = {
   addSource: (id: string, url: string) => call<SourceMatch>('POST', `/requests/${id}/add-source`, { url }),
 
   sources: () => call<SourceInfo[]>('GET', '/sources'),
+  syncSuwayomi: () => call<{ count: number; sources: SourceInfo[] }>('POST', '/sources/suwayomi/sync'),
+  suwayomiStatus: () => call<SuwayomiStatus>('GET', '/sources/suwayomi/status'),
+  setupSuwayomi: () => call<{ status: SuwayomiStatus; count: number; sources: SourceInfo[] }>('POST', '/sources/suwayomi/setup'),
+  stopSuwayomi: () => call<SuwayomiStatus>('POST', '/sources/suwayomi/stop'),
+  suwayomiExtensions: () => call<{ extensions: SuwayomiExtensionInfo[] }>('GET', '/sources/suwayomi/extensions'),
+  installSuwayomiExtension: (pkgName: string) =>
+    call<{ count: number; sources: SourceInfo[] }>('POST', `/sources/suwayomi/extensions/${encodeURIComponent(pkgName)}/install`),
+  uninstallSuwayomiExtension: (pkgName: string) =>
+    call<{ count: number; sources: SourceInfo[] }>('POST', `/sources/suwayomi/extensions/${encodeURIComponent(pkgName)}/uninstall`),
   setSourceEnabled: (id: string, enabled: boolean) => call<SourceInfo[]>('PUT', `/sources/${id}`, { enabled }),
   testSource: (id: string, query: string) => call<{ ok: boolean; hits: SourceSeriesHit[]; ms: number }>('POST', `/sources/${id}/test`, { query }),
 
@@ -142,6 +170,7 @@ export const api = {
     call<Link>('PATCH', `/links/${id}`, patch),
   deleteLink: (id: number) => call<{ ok: true }>('DELETE', `/links/${id}`),
   checkLink: (id: number) => call<{ added: number; link: Link }>('POST', `/links/${id}/check`),
+  refreshAtsu: (linkIds?: number[]) => call<{ updated: number; links: Link[] }>('POST', '/links/refresh-atsu', linkIds ? { linkIds } : {}),
   setChapterState: (chapterIds: number[], state: 'skipped' | 'known' | 'pending' | 'uploaded') =>
     call<{ ok: true }>('POST', '/chapters/state', { chapterIds, state }),
 
@@ -161,4 +190,33 @@ export function useServerEvents(onEvent: (ev: ServerEvent) => void): void {
   };
   chrome.runtime.onMessage.addListener(listener);
   onUnmounted(() => chrome.runtime.onMessage.removeListener(listener));
+}
+
+export const START_SERVER_URL = 'atsusync://start';
+
+/** Polls the local server until it responds or the timeout/abort signal triggers. */
+export async function waitForServerOnline(signal?: AbortSignal, timeoutMs = 90_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) return false;
+    try {
+      await api.settings();
+      return true;
+    } catch (e) {
+      const err = e as Error & { status?: number };
+      if (err.status !== 0) return true;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 1500);
+      signal?.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+    });
+  }
+  return false;
 }
