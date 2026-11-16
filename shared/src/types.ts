@@ -425,3 +425,25 @@ export type ServerEvent =
   | { type: 'discovery_start'; requestId: string; sources: { id: string; name: string }[] }
   | { type: 'discovery_progress'; requestId: string; sourceId: string; sourceName: string; matches: SourceMatch[]; error: string | null }
   | { type: 'discovery_done'; requestId: string; seriesTitle: string; matchCount: number };
+
+export interface UpdateStatus {
+  currentVersion: string;
+  currentCommit: string | null;
+  latestVersion: string | null;
+  latestCommit: string | null;
+  latestMessage: string | null;
+  updateAvailable: boolean;
+  canAutoUpdate: boolean;
+  repoUrl: string;
+  downloadUrl: string;
+  checkedAt: string | null;
+  error: string | null;
+}
+
+export interface UpdateApplyResult {
+  ok: boolean;
+  updated: boolean;
+  needsReload: boolean;
+  message: string;
+  downloadUrl?: string;
+}

@@ -46,6 +46,7 @@ import type { TorrentClient } from './sources/torrent.ts';
 import { DownloadPipeline } from './upload/pipeline.ts';
 import { Watcher } from './watcher/watcher.ts';
 import { createPrettyStream, fmt, formatDuration, formatStatus } from './logger.ts';
+import { Updater } from './updater.ts';
 
 export interface AppOptions {
   dbFile: string;
@@ -182,6 +183,13 @@ export function buildApp(opts: AppOptions) {
     }
     return settingsView();
   });
+
+  const updater = new Updater({ fetchImpl: opts.fetchImpl });
+
+  app.get<{ Querystring: { refresh?: string } }>('/api/server/update', async (req) =>
+    updater.check(req.query.refresh === '1' || req.query.refresh === 'true'),
+  );
+  app.post('/api/server/update', async () => updater.apply());
 
   app.post('/api/server/stop', async (_req, reply) => {
     reply.send({ ok: true });

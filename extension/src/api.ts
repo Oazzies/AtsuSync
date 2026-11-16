@@ -19,6 +19,8 @@ import type {
   SourceSeriesHit,
   SuwayomiExtensionInfo,
   SuwayomiStatus,
+  UpdateApplyResult,
+  UpdateStatus,
 } from '@atsusync/shared';
 
 export type BgRequest =
@@ -197,6 +199,8 @@ export function getSidePanelState(): Promise<boolean> {
 export const api = {
   settings: () => call<SettingsView>('GET', '/settings'),
   saveSettings: (patch: Partial<Settings>) => call<SettingsView>('PUT', '/settings', patch),
+  checkUpdate: (refresh = false) => call<UpdateStatus>('GET', `/server/update${refresh ? '?refresh=1' : ''}`),
+  applyUpdate: () => call<UpdateApplyResult>('POST', '/server/update'),
   stopServer: () => call<{ ok: boolean }>('POST', '/server/stop'),
 
   requests: () => call<ContentRequest[]>('GET', '/requests'),

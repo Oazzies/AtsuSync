@@ -14,6 +14,7 @@ import {
   type LnreaderStatus,
   type SuwayomiExtensionInfo,
   type SuwayomiStatus,
+  type UpdateStatus,
 } from '@atsusync/shared';
 import { api, START_SERVER_URL, syncCookiesNow, useCoverResolver, useServerEvents, waitForServerOnline } from '../api';
 import AlertBanner from '../ui/AlertBanner.vue';
@@ -340,6 +341,7 @@ onMounted(async () => {
     /* ignore */
   }
   void load(false);
+  void checkUpdates(false);
   void syncActiveTab();
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
   chrome.tabs.onActivated.addListener(onTabActivated);
@@ -580,6 +582,41 @@ async function setExtInstalled(ext: SuwayomiExtensionInfo, install: boolean) {
 }
 
 const stoppingServer = ref(false);
+const updateStatus = ref<UpdateStatus | null>(null);
+const checkingUpdate = ref(false);
+const applyingUpdate = ref(false);
+const updateMessage = ref<string | null>(null);
+
+async function checkUpdates(refresh = true) {
+  if (checkingUpdate.value) return;
+  checkingUpdate.value = true;
+  if (refresh) updateMessage.value = null;
+  try {
+    updateStatus.value = await api.checkUpdate(refresh);
+  } catch (e) {
+    if (refresh) error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    checkingUpdate.value = false;
+  }
+}
+
+async function applyUpdateNow() {
+  if (applyingUpdate.value) return;
+  applyingUpdate.value = true;
+  error.value = null;
+  updateMessage.value = null;
+  try {
+    const res = await api.applyUpdate();
+    updateMessage.value = res.message;
+    if (res.updated) {
+      updateStatus.value = await api.checkUpdate(true).catch(() => updateStatus.value);
+    }
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    applyingUpdate.value = false;
+  }
+}
 
 async function stopServer() {
   if (stoppingServer.value) return;
@@ -671,6 +708,7 @@ async function syncCookie() {
         <button class="sp-tab" role="tab" :aria-selected="tab === 'settings'" :class="{ active: tab === 'settings' }" @click="tab = 'settings'">
           <Icon name="settings" />
           <span>Settings</span>
+          <span v-if="updateStatus?.updateAvailable" class="sp-tab-count" title="Update available">!</span>
         </button>
       </div>
       <div class="sp-tabs-actions">
@@ -946,6 +984,54 @@ async function syncCookie() {
               </span>
               <input type="checkbox" :checked="notifications[opt.key]" @change="toggleNotification(opt.key)" />
             </label>
+          </div>
+        </div>
+
+        <div class="sp-card">
+          <div class="sp-row">
+            <div style="min-width: 0">
+              <div class="sp-title">Updates</div>
+              <div class="sp-muted">
+                <template v-if="updateStatus">
+                  v{{ updateStatus.currentVersion }}<template v-if="updateStatus.currentCommit"> ({{ updateStatus.currentCommit }})</template>
+                  <template v-if="updateStatus.updateAvailable">
+                    — Update available<template v-if="updateStatus.latestCommit"> ({{ updateStatus.latestCommit }})</template>
+                  </template>
+                  <template v-else-if="updateStatus.error"> — {{ updateStatus.error }}</template>
+                  <template v-else> — Up to date</template>
+                </template>
+                <template v-else>Check GitHub for new releases</template>
+              </div>
+            </div>
+            <div class="sp-row" style="gap: 6px">
+              <button class="sp-btn sm" :disabled="checkingUpdate" title="Check for updates" @click="checkUpdates(true)">
+                <Icon name="refresh" :class="{ 'sp-spin': checkingUpdate }" />
+              </button>
+              <button
+                v-if="updateStatus?.updateAvailable && updateStatus.canAutoUpdate"
+                class="sp-btn primary sm"
+                :disabled="applyingUpdate"
+                @click="applyUpdateNow"
+              >
+                <Icon name="download" :class="{ 'sp-spin': applyingUpdate }" />
+                {{ applyingUpdate ? 'Updating…' : 'Update' }}
+              </button>
+              <a
+                v-else-if="updateStatus?.updateAvailable"
+                class="sp-btn primary sm"
+                :href="updateStatus.repoUrl"
+                target="_blank"
+                rel="noopener"
+              >
+                GitHub
+              </a>
+            </div>
+          </div>
+          <div v-if="updateStatus?.updateAvailable && updateStatus.latestMessage" class="sp-muted" style="font-size: 11px; margin-top: 6px">
+            Latest: {{ updateStatus.latestMessage }}
+          </div>
+          <div v-if="updateMessage" class="sp-muted" style="font-size: 11px; margin-top: 6px; color: var(--sp-accent, #7dd3fc)">
+            {{ updateMessage }}
           </div>
         </div>
 

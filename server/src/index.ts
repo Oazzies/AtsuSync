@@ -18,7 +18,15 @@ const { app } = buildApp({ dbFile: join(dataDir, 'atsusync.db'), onShutdown: shu
 app
   .listen({ port: config.port, host: '127.0.0.1' })
   .then((addr) => app.log.info(`AtsuSync API on ${addr}`))
-  .catch((err) => {
+  .catch(async (err) => {
+    const code = (err as { code?: string })?.code;
+    if (code === 'EADDRINUSE') {
+      const alive = await fetch(`http://127.0.0.1:${config.port}/api/settings`).then((r) => r.ok).catch(() => false);
+      if (alive) {
+        app.log.info(`AtsuSync API is already running on http://127.0.0.1:${config.port}`);
+        process.exit(0);
+      }
+    }
     app.log.error(err);
     process.exit(1);
   });
