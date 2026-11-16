@@ -143,6 +143,16 @@ async function broadcastEvent(event: ServerEvent): Promise<void> {
       title: `${event.seriesTitle}: All chapters downloaded`,
       message: `${event.count} chapter ZIP${event.count === 1 ? '' : 's'} ready to attach on upload`,
     });
+  } else if (event.type === 'discovery_done') {
+    chrome.notifications.create(`discovery-${event.requestId}-${Date.now()}`, {
+      type: 'basic',
+      iconUrl,
+      title: `${event.seriesTitle}: Source searching finished`,
+      message:
+        event.matchCount === 0
+          ? 'No matching sources found'
+          : `${event.matchCount} source match${event.matchCount === 1 ? '' : 'es'} found`,
+    });
   }
 }
 
