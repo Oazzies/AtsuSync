@@ -1,10 +1,34 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import type { Link, SettingsView, SourceInfo, SuwayomiExtensionInfo, SuwayomiStatus } from '@atsusync/shared';
-import { api, START_SERVER_URL, syncCookiesNow, useServerEvents, waitForServerOnline } from '../api';
+import {
+  DEFAULT_NOTIFICATION_SETTINGS,
+  DEFAULT_SOURCE_SEARCH_FILTER,
+  SOURCE_FILTER_OPTIONS,
+  matchesSourceFilter,
+  type Link,
+  type NotificationSettings,
+  type SettingsView,
+  type SourceInfo,
+  type SourceSearchFilter,
+  type LncrawlStatus,
+  type LnreaderStatus,
+  type SuwayomiExtensionInfo,
+  type SuwayomiStatus,
+} from '@atsusync/shared';
+import { api, START_SERVER_URL, syncCookiesNow, useCoverResolver, useServerEvents, waitForServerOnline } from '../api';
+import AlertBanner from '../ui/AlertBanner.vue';
 import Icon from '../ui/Icon.vue';
 
-const tab = ref<'tracked' | 'sources'>('tracked');
+const NOTIFICATION_SETTINGS_KEY = 'atsuSync.notifications';
+const NOTIFICATION_OPTIONS: { key: keyof NotificationSettings; label: string; description: string }[] = [
+  { key: 'new_chapters', label: 'New chapters', description: 'When a tracked series gets new chapters' },
+  { key: 'chapters_unlocked', label: 'Chapters unlocked', description: 'When locked chapters become free to download' },
+  { key: 'downloads_complete', label: 'Downloads complete', description: 'When chapter ZIPs finish downloading' },
+  { key: 'discovery_done', label: 'Source search finished', description: 'When background source discovery finishes' },
+];
+
+const tab = ref<'tracked' | 'sources' | 'settings'>('tracked');
+const notifications = ref<NotificationSettings>({ ...DEFAULT_NOTIFICATION_SETTINGS });
 const online = ref<boolean | null>(null);
 const starting = ref(false);
 const busy = ref(false);
@@ -16,15 +40,29 @@ const links = ref<Link[]>([]);
 const sources = ref<SourceInfo[]>([]);
 const settings = ref<SettingsView | null>(null);
 const brokenCovers = ref(new Set<number>());
+const { coverSrc, preload: preloadCovers } = useCoverResolver();
+watch(links, (list) => preloadCovers(list.map((l) => l.cover)), { immediate: true });
 
 // Keiyoushi / Suwayomi state
 const suwayomiStatus = ref<SuwayomiStatus | null>(null);
 const settingUpSuwayomi = ref(false);
+// LNCrawl state
+const lncrawlStatus = ref<LncrawlStatus | null>(null);
+const settingUpLncrawl = ref(false);
+// LNReader state
+const lnreaderStatus = ref<LnreaderStatus | null>(null);
+const syncingLnreader = ref(false);
 const showExtensions = ref(false);
 const loadingExtensions = ref(false);
 const extensions = ref<SuwayomiExtensionInfo[]>([]);
 const extSearch = ref('');
 const sourceSearch = ref('');
+const SIDEBAR_SOURCE_FILTER_KEY = 'atsusync_sidebar_source_filter';
+const sourceFilter = ref<SourceSearchFilter>({ ...DEFAULT_SOURCE_SEARCH_FILTER });
+const sourceFilterOpen = ref(false);
+const sourceFilterWrapEl = ref<HTMLElement | null>(null);
+const activeFilterCount = computed(() => SOURCE_FILTER_OPTIONS.filter((o) => sourceFilter.value[o.key]).length);
+const isSourceFiltered = computed(() => activeFilterCount.value < SOURCE_FILTER_OPTIONS.length);
 const busyPkg = ref<Record<string, boolean>>({});
 
 const filteredExtensions = computed(() => {
@@ -36,16 +74,20 @@ const filteredExtensions = computed(() => {
 
 const filteredSources = computed(() => {
   const q = sourceSearch.value.trim().toLowerCase();
-  return sources.value.filter((s) =>
-    !q ? true : s.name.toLowerCase().includes(q) || s.kind.toLowerCase().includes(q),
-  );
+  return sources.value.filter((s) => {
+    if (!matchesSourceFilter(s, sourceFilter.value)) return false;
+    return !q ? true : s.name.toLowerCase().includes(q) || s.kind.toLowerCase().includes(q);
+  });
 });
 
 // Active tab context for smart Tracked filtering
+const activeTabId = ref<number | null>(null);
 const activeTabUrl = ref<string | null>(null);
 const activeRequestId = ref<string | null>(null);
 const activeMangaId = ref<string | null>(null);
 const showAllOnPage = ref(false);
+const dockOpen = ref(false);
+const toolsOpen = ref(false);
 const showFullyOnAtsu = ref(false);
 const resolvedSourceCache = new Map<string, { requestId: string | null; mangaId: string | null }>();
 
@@ -155,17 +197,21 @@ async function load(refreshAtsuState = false) {
     if (refreshAtsuState) {
       await api.refreshAtsu().catch(() => null);
     }
-    const [s, l, src, sw] = await Promise.all([
+    const [s, l, src, sw, ln, lnr] = await Promise.all([
       api.settings(),
       api.links(),
       api.sources(),
       api.suwayomiStatus().catch(() => null),
+      api.lncrawlStatus().catch(() => null),
+      api.lnreaderStatus().catch(() => null),
     ]);
     online.value = true;
     settings.value = s;
     links.value = l;
     sources.value = src;
     suwayomiStatus.value = sw;
+    lncrawlStatus.value = ln;
+    lnreaderStatus.value = lnr;
   } catch (e) {
     const err = e as Error & { status?: number };
     if (err.status === 0) online.value = false;
@@ -173,18 +219,46 @@ async function load(refreshAtsuState = false) {
   }
 }
 
+async function syncDockState(tab?: chrome.tabs.Tab | null) {
+  if (!tab?.id || !tab.url?.startsWith('https://atsu.moe/')) {
+    dockOpen.value = false;
+    toolsOpen.value = false;
+    return;
+  }
+  const tabId = tab.id;
+  const res = (await chrome.tabs.sendMessage(tabId, { type: 'getDockState' }).catch(() => null)) as
+    | { open?: boolean; toolsOpen?: boolean }
+    | null;
+  if (activeTabId.value === tabId) {
+    dockOpen.value = Boolean(res?.open);
+    toolsOpen.value = Boolean(res?.toolsOpen);
+  }
+}
+
 async function syncActiveTab() {
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
-  await updateActiveContext(active?.url);
+  activeTabId.value = active?.id ?? null;
+  await Promise.all([updateActiveContext(active?.url), syncDockState(active)]);
 }
 
 function onTabActivated() {
   void syncActiveTab();
 }
 
-function onTabUpdated(_tabId: number, changeInfo: { url?: string; status?: string }, tabInfo: chrome.tabs.Tab) {
+function onTabUpdated(tabId: number, changeInfo: { url?: string; status?: string }, tabInfo: chrome.tabs.Tab) {
   if (tabInfo.active && (changeInfo.url || changeInfo.status === 'complete')) {
+    activeTabId.value = tabId;
     void updateActiveContext(changeInfo.url ?? tabInfo.url);
+    void syncDockState(tabInfo);
+  }
+}
+
+function onRuntimeMessage(msg: unknown, sender: chrome.runtime.MessageSender) {
+  if (!msg || typeof msg !== 'object') return;
+  const m = msg as { type?: string; open?: boolean };
+  if (sender.tab?.id !== undefined && sender.tab.id === activeTabId.value && typeof m.open === 'boolean') {
+    if (m.type === 'dockState') dockOpen.value = m.open;
+    else if (m.type === 'toolsState') toolsOpen.value = m.open;
   }
 }
 
@@ -206,19 +280,82 @@ function connectSidePanelPort() {
   }
 }
 
-onMounted(() => {
+async function loadNotificationSettings() {
+  try {
+    const stored = await chrome.storage?.local?.get(NOTIFICATION_SETTINGS_KEY);
+    const raw = stored?.[NOTIFICATION_SETTINGS_KEY];
+    if (raw && typeof raw === 'object') {
+      notifications.value = { ...DEFAULT_NOTIFICATION_SETTINGS, ...(raw as Partial<NotificationSettings>) };
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function toggleNotification(key: keyof NotificationSettings) {
+  const next: NotificationSettings = {
+    ...notifications.value,
+    [key]: !notifications.value[key],
+  };
+  notifications.value = next;
+  void chrome.storage?.local?.set({ [NOTIFICATION_SETTINGS_KEY]: next });
+}
+
+function onDocPointerDown(e: PointerEvent) {
+  if (!sourceFilterOpen.value) return;
+  const wrap = sourceFilterWrapEl.value;
+  if (wrap && !e.composedPath().includes(wrap)) {
+    sourceFilterOpen.value = false;
+  }
+}
+
+function onDocKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && sourceFilterOpen.value) {
+    sourceFilterOpen.value = false;
+  }
+}
+
+watch(
+  sourceFilter,
+  (val) => {
+    try {
+      void chrome.storage?.local?.set({ [SIDEBAR_SOURCE_FILTER_KEY]: { ...val } });
+    } catch {
+      /* ignore */
+    }
+  },
+  { deep: true },
+);
+
+onMounted(async () => {
   connectSidePanelPort();
+  void loadNotificationSettings();
+  try {
+    const stored = await chrome.storage?.local?.get(SIDEBAR_SOURCE_FILTER_KEY);
+    const savedFilter = stored?.[SIDEBAR_SOURCE_FILTER_KEY] as Partial<SourceSearchFilter> | undefined;
+    if (savedFilter && typeof savedFilter === 'object') {
+      sourceFilter.value = { ...DEFAULT_SOURCE_SEARCH_FILTER, ...savedFilter };
+    }
+  } catch {
+    /* ignore */
+  }
   void load(false);
   void syncActiveTab();
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
   chrome.tabs.onActivated.addListener(onTabActivated);
   chrome.tabs.onUpdated.addListener(onTabUpdated);
+  window.addEventListener('pointerdown', onDocPointerDown, true);
+  window.addEventListener('keydown', onDocKeyDown);
 });
 
 onUnmounted(() => {
   sidePanelPort?.disconnect();
   sidePanelPort = null;
+  chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   chrome.tabs.onActivated.removeListener(onTabActivated);
   chrome.tabs.onUpdated.removeListener(onTabUpdated);
+  window.removeEventListener('pointerdown', onDocPointerDown, true);
+  window.removeEventListener('keydown', onDocKeyDown);
   startAbort?.abort();
 });
 
@@ -264,16 +401,31 @@ async function openUrl(url: string) {
   }
 }
 
-async function summonDock() {
+async function toggleTabWindow(type: 'toggleDock' | 'toggleTools', label: string, stateRef: typeof dockOpen) {
   error.value = null;
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (active?.id !== undefined && active.url?.startsWith('https://atsu.moe/')) {
-    await chrome.tabs.sendMessage(active.id, { type: 'summonDock' }).catch(() => {
-      error.value = 'Reload the atsu.moe tab to connect the floating window.';
-    });
+    try {
+      const res = (await chrome.tabs.sendMessage(active.id, { type })) as { open?: boolean } | undefined;
+      if (typeof res?.open === 'boolean') {
+        stateRef.value = res.open;
+      }
+    } catch {
+      stateRef.value = false;
+      error.value = `Reload the atsu.moe tab to connect the ${label}.`;
+    }
   } else {
-    error.value = 'Open an atsu.moe tab first to summon the floating window.';
+    stateRef.value = false;
+    error.value = `Open an atsu.moe tab first to summon the ${label}.`;
   }
+}
+
+function toggleDock() {
+  return toggleTabWindow('toggleDock', 'floating window', dockOpen);
+}
+
+function toggleTools() {
+  return toggleTabWindow('toggleTools', 'tools window', toolsOpen);
 }
 
 async function checkLink(id: number) {
@@ -331,6 +483,69 @@ async function syncSuwayomi() {
   }
 }
 
+async function setupLncrawl() {
+  settingUpLncrawl.value = true;
+  error.value = null;
+  try {
+    const res = await api.setupLncrawl();
+    lncrawlStatus.value = res.status;
+    sources.value = res.sources;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+    lncrawlStatus.value = await api.lncrawlStatus().catch(() => null);
+  } finally {
+    settingUpLncrawl.value = false;
+  }
+}
+
+async function stopLncrawl() {
+  error.value = null;
+  try {
+    lncrawlStatus.value = await api.stopLncrawl();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function syncLncrawl() {
+  busy.value = true;
+  error.value = null;
+  try {
+    const res = await api.syncLncrawl();
+    sources.value = res.sources;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function syncLnreader() {
+  syncingLnreader.value = true;
+  error.value = null;
+  try {
+    const res = await api.syncLnreader();
+    lnreaderStatus.value = res.status;
+    sources.value = res.sources;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+    lnreaderStatus.value = await api.lnreaderStatus().catch(() => null);
+  } finally {
+    syncingLnreader.value = false;
+  }
+}
+
+async function disableLnreader() {
+  error.value = null;
+  try {
+    const res = await api.disableLnreader();
+    lnreaderStatus.value = res.status;
+    sources.value = res.sources;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
 async function loadExtensions() {
   loadingExtensions.value = true;
   try {
@@ -364,6 +579,22 @@ async function setExtInstalled(ext: SuwayomiExtensionInfo, install: boolean) {
   }
 }
 
+const stoppingServer = ref(false);
+
+async function stopServer() {
+  if (stoppingServer.value) return;
+  stoppingServer.value = true;
+  error.value = null;
+  try {
+    await api.stopServer();
+    online.value = false;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    stoppingServer.value = false;
+  }
+}
+
 async function syncCookie() {
   busy.value = true;
   error.value = null;
@@ -375,24 +606,44 @@ async function syncCookie() {
     busy.value = false;
   }
 }
-
-async function syncRequests() {
-  busy.value = true;
-  error.value = null;
-  try {
-    await api.syncRequests(false);
-    await load(false);
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    busy.value = false;
-  }
-}
 </script>
 
 <template>
   <div class="sp-shell">
-    <div v-if="online === false" class="sp-offline-screen">
+    <div v-if="online === null" class="sp-shell" aria-busy="true" aria-label="Loading AtsuSync">
+      <div class="sp-tabs-wrap">
+        <div class="sp-tabs" aria-hidden="true">
+          <div class="sp-skel" style="flex: 1; height: 32px; border-radius: 7px" />
+          <div class="sp-skel" style="flex: 1; height: 32px; border-radius: 7px" />
+          <div class="sp-skel" style="flex: 1; height: 32px; border-radius: 7px" />
+        </div>
+        <div class="sp-tabs-actions" aria-hidden="true">
+          <div class="sp-skel" style="width: 30px; height: 30px; border-radius: 6px" />
+          <div class="sp-skel" style="width: 30px; height: 30px; border-radius: 6px" />
+        </div>
+      </div>
+      <main class="sp-body" aria-hidden="true">
+        <div v-for="n in 3" :key="`sp-skel-${n}`" class="sp-card">
+          <div class="sp-series-head">
+            <div class="sp-skel sp-skel-cover" />
+            <div class="sp-series-info" style="gap: 7px">
+              <div class="sp-skel sp-skel-line lg" style="width: 82%" />
+              <div class="sp-skel sp-skel-line sm" style="width: 56%" />
+              <div class="sp-badges">
+                <div class="sp-skel sp-skel-pill" />
+                <div class="sp-skel sp-skel-pill" style="width: 48px" />
+              </div>
+            </div>
+          </div>
+          <div class="sp-series-actions">
+            <div class="sp-skel" style="flex: 1; height: 30px; border-radius: 8px" />
+            <div class="sp-skel" style="width: 74px; height: 30px; border-radius: 8px" />
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <div v-else-if="online === false" class="sp-offline-screen">
       <a
         :href="START_SERVER_URL"
         class="sp-start-btn"
@@ -406,25 +657,6 @@ async function syncRequests() {
     </div>
 
     <template v-else-if="online === true">
-    <header class="sp-header">
-      <div class="sp-brand">
-        <span class="sp-wordmark">Atsu<span>Sync</span></span>
-        <span v-if="!online" class="sp-badge red">Offline</span>
-      </div>
-      <div class="sp-header-actions">
-        <span v-if="settings?.atsuUser" class="sp-badge green sp-user-chip" :title="settings.atsuUser">
-          {{ settings.atsuUser }}
-        </span>
-        <button class="sp-btn sm" title="Summon floating window on atsu.moe" @click="summonDock">
-          <Icon name="panel" />
-          <span>Window</span>
-        </button>
-        <button class="sp-btn sm" :disabled="busy" title="Refresh" @click="load(true)">
-          <Icon name="refresh" :class="{ 'sp-spin': busy }" />
-        </button>
-      </div>
-    </header>
-
     <div class="sp-tabs-wrap">
       <div class="sp-tabs" role="tablist">
         <button class="sp-tab" role="tab" :aria-selected="tab === 'tracked'" :class="{ active: tab === 'tracked' }" @click="tab = 'tracked'">
@@ -436,12 +668,32 @@ async function syncRequests() {
           <Icon name="globe" />
           <span>Sources</span>
         </button>
+        <button class="sp-tab" role="tab" :aria-selected="tab === 'settings'" :class="{ active: tab === 'settings' }" @click="tab = 'settings'">
+          <Icon name="settings" />
+          <span>Settings</span>
+        </button>
+      </div>
+      <div class="sp-tabs-actions">
+        <button
+          class="sp-icon-btn"
+          :title="dockOpen ? 'Close upload window on atsu.moe' : 'Open upload window on atsu.moe'"
+          :aria-label="dockOpen ? 'Close upload window on atsu.moe' : 'Open upload window on atsu.moe'"
+          @click="toggleDock"
+        >
+          <Icon name="upload" />
+        </button>
+        <button
+          class="sp-icon-btn"
+          :title="toolsOpen ? 'Close tools window on atsu.moe' : 'Open tools window on atsu.moe'"
+          :aria-label="toolsOpen ? 'Close tools window on atsu.moe' : 'Open tools window on atsu.moe'"
+          @click="toggleTools"
+        >
+          <Icon name="wrench" />
+        </button>
       </div>
     </div>
 
     <main class="sp-body">
-      <div v-if="error" class="sp-error">{{ error }}</div>
-
       <template v-if="tab === 'tracked'">
         <div v-if="hasPageFilter" class="sp-row">
           <span class="sp-muted">{{ showAllOnPage ? 'Showing all' : 'On current page' }}</span>
@@ -476,8 +728,8 @@ async function syncRequests() {
           <div class="sp-series-head">
             <div class="sp-cover-wrap">
               <img
-                v-if="l.cover && !brokenCovers.has(l.id)"
-                :src="l.cover"
+                v-if="coverSrc(l.cover) && !brokenCovers.has(l.id)"
+                :src="coverSrc(l.cover)!"
                 :alt="l.seriesTitle"
                 class="sp-cover"
                 loading="lazy"
@@ -501,7 +753,7 @@ async function syncRequests() {
             </div>
           </div>
 
-          <div v-if="l.lastError" class="sp-error">{{ l.lastError }}</div>
+          <AlertBanner v-if="l.lastError" kind="error" prefix="sp" :message="l.lastError" />
 
           <div class="sp-series-actions">
             <button class="sp-btn primary" @click="openUrl(atsuUrlForLink(l))">
@@ -514,7 +766,49 @@ async function syncRequests() {
         </article>
       </template>
 
-      <template v-else>
+      <template v-else-if="tab === 'sources'">
+        <div class="sp-card">
+          <div class="sp-row" style="margin-bottom: 8px">
+            <div class="sp-section-title" style="margin: 0">
+              Sources ({{ filteredSources.length }}<span v-if="sourceSearch.trim() || isSourceFiltered"> / {{ sources.length }}</span>)
+            </div>
+            <div ref="sourceFilterWrapEl" class="sp-filter-wrap">
+              <button
+                type="button"
+                class="sp-btn sm"
+                :class="{ 'sp-filter-active': isSourceFiltered }"
+                :aria-expanded="sourceFilterOpen"
+                title="Filter sources by category"
+                @click="sourceFilterOpen = !sourceFilterOpen"
+              >
+                <Icon name="filter" />
+                <span v-if="isSourceFiltered">{{ activeFilterCount }}/{{ SOURCE_FILTER_OPTIONS.length }}</span>
+              </button>
+              <div v-if="sourceFilterOpen" class="sp-filter-menu" role="menu" aria-label="Source filter">
+                <label v-for="opt in SOURCE_FILTER_OPTIONS" :key="opt.key" class="sp-filter-item">
+                  <input v-model="sourceFilter[opt.key]" type="checkbox" />
+                  <span>{{ opt.label }}</span>
+                </label>
+              </div>
+            </div>
+          </div>
+          <input v-model="sourceSearch" class="sp-input" type="search" placeholder="Filter sources…" style="margin-bottom: 8px" />
+          <div v-if="!filteredSources.length" class="sp-muted" style="padding: 6px 2px">
+            No sources match the current filter.
+          </div>
+          <div v-else>
+            <label v-for="s in filteredSources" :key="s.id" class="sp-source-row">
+              <span class="sp-source-name">
+                <span>{{ s.name }}</span>
+                <span class="sp-muted">({{ s.kind }})</span>
+              </span>
+              <input type="checkbox" :checked="s.enabled" @change="toggleSource(s)" />
+            </label>
+          </div>
+        </div>
+      </template>
+
+      <template v-else-if="tab === 'settings'">
         <div class="sp-card">
           <div class="sp-row">
             <div style="min-width: 0">
@@ -525,16 +819,12 @@ async function syncRequests() {
             </div>
             <button class="sp-btn" :disabled="busy" @click="syncCookie"><Icon name="refresh" /> Sync cookie</button>
           </div>
-          <div class="sp-row">
-            <span class="sp-muted">Forum requests</span>
-            <button class="sp-btn" :disabled="busy" @click="syncRequests"><Icon name="refresh" /> Sync now</button>
-          </div>
         </div>
 
         <div class="sp-card">
           <div class="sp-row">
             <div style="min-width: 0">
-              <div class="sp-title">Keiyoushi / Suwayomi</div>
+              <div class="sp-title">Keiyoushi &amp; Yūzōnō / Suwayomi</div>
               <div class="sp-muted">
                 {{ suwayomiStatus?.running ? (suwayomiStatus.managed ? 'Running (managed)' : 'Connected') : 'Not running' }}
               </div>
@@ -553,10 +843,23 @@ async function syncRequests() {
               <button v-if="suwayomiStatus.managed" class="sp-btn ghost sm" @click="stopSuwayomi">Stop</button>
             </div>
           </div>
+          <div v-if="!suwayomiStatus?.running" class="sp-muted" style="font-size: 11px; line-height: 1.4">
+            <template v-if="suwayomiStatus?.jarPresent">
+              Installed locally (~1.1 GB on disk). Click Auto-setup to start.
+            </template>
+            <template v-else>
+              Downloads Suwayomi-Server, Chromium runtime &amp; English extensions (~1.1 GB disk space; Java is installed automatically if missing).
+            </template>
+          </div>
 
           <div v-if="showExtensions" style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px">
-            <input v-model="extSearch" class="sp-input" type="search" placeholder="Search English Keiyoushi extensions…" />
-            <div v-if="loadingExtensions" class="sp-muted">Loading extension catalog…</div>
+            <input v-model="extSearch" class="sp-input" type="search" placeholder="Search English Keiyoushi / Yūzōnō extensions…" />
+            <div v-if="loadingExtensions" style="display: flex; flex-direction: column; gap: 6px" aria-busy="true" aria-label="Loading extension catalog">
+              <div v-for="n in 4" :key="`ext-skel-${n}`" class="sp-row" style="gap: 8px" aria-hidden="true">
+                <div class="sp-skel sp-skel-line" :style="{ width: `${45 + (n % 3) * 15}%` }" />
+                <div class="sp-skel" style="width: 54px; height: 26px; border-radius: 6px" />
+              </div>
+            </div>
             <template v-else>
               <div class="sp-muted" style="font-size: 11px">{{ filteredExtensions.length }} English extensions</div>
               <div style="display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto">
@@ -581,24 +884,88 @@ async function syncRequests() {
         </div>
 
         <div class="sp-card">
-          <div class="sp-row" style="margin-bottom: 8px">
-            <div class="sp-section-title" style="margin: 0">
-              Sources ({{ filteredSources.length }}<span v-if="sourceSearch.trim()"> / {{ sources.length }}</span>)
+          <div class="sp-row">
+            <div style="min-width: 0">
+              <div class="sp-title">LNCrawl (Novels)</div>
+              <div class="sp-muted">
+                {{ lncrawlStatus?.running ? (lncrawlStatus.managed ? 'Running (managed)' : 'Connected') : 'Not running' }}
+              </div>
+            </div>
+            <button v-if="!lncrawlStatus?.running" class="sp-btn primary sm" :disabled="settingUpLncrawl" @click="setupLncrawl">
+              <Icon name="download" :class="{ 'sp-spin': settingUpLncrawl }" />
+              {{ settingUpLncrawl ? 'Setting up…' : 'Auto-setup' }}
+            </button>
+            <div v-else class="sp-row" style="gap: 6px">
+              <button class="sp-btn sm" :disabled="busy" title="Sync novel sources" @click="syncLncrawl">
+                <Icon name="refresh" :class="{ 'sp-spin': busy }" />
+              </button>
+              <button v-if="lncrawlStatus.managed" class="sp-btn ghost sm" @click="stopLncrawl">Stop</button>
             </div>
           </div>
-          <input v-model="sourceSearch" class="sp-input" type="search" placeholder="Filter sources…" style="margin-bottom: 8px" />
-          <div style="max-height: 360px; overflow-y: auto">
-            <label v-for="s in filteredSources" :key="s.id" class="sp-source-row">
-              <span class="sp-source-name">
-                <span>{{ s.name }}</span>
-                <span class="sp-muted">({{ s.kind }})</span>
+          <div v-if="!lncrawlStatus?.running" class="sp-muted" style="font-size: 11px; line-height: 1.4">
+            <template v-if="lncrawlStatus?.installed">
+              Installed locally. Click Auto-setup to start lightnovel-crawler novel sources.
+            </template>
+            <template v-else>
+              Installs lightnovel-crawler in an isolated environment for 300+ novel sources (Python/uv is installed automatically if missing).
+            </template>
+          </div>
+        </div>
+
+        <div class="sp-card">
+          <div class="sp-row">
+            <div style="min-width: 0">
+              <div class="sp-title">LNReader (Novels)</div>
+              <div class="sp-muted">
+                {{ lnreaderStatus?.enabled ? `Enabled (${lnreaderStatus.pluginCount} plugins)` : 'Disabled' }}
+              </div>
+            </div>
+            <button v-if="!lnreaderStatus?.enabled" class="sp-btn primary sm" :disabled="syncingLnreader" @click="syncLnreader">
+              <Icon name="download" :class="{ 'sp-spin': syncingLnreader }" />
+              {{ syncingLnreader ? 'Syncing…' : 'Enable & Sync' }}
+            </button>
+            <div v-else class="sp-row" style="gap: 6px">
+              <button class="sp-btn sm" :disabled="syncingLnreader" title="Refresh LNReader plugins" @click="syncLnreader">
+                <Icon name="refresh" :class="{ 'sp-spin': syncingLnreader }" />
+              </button>
+              <button class="sp-btn ghost sm" @click="disableLnreader">Disable</button>
+            </div>
+          </div>
+          <div v-if="!lnreaderStatus?.enabled" class="sp-muted" style="font-size: 11px; line-height: 1.4">
+            Adds 200+ English LNReader JS novel plugins (runs directly in Node.js, no extra runtime needed).
+          </div>
+        </div>
+
+        <div class="sp-card">
+          <div class="sp-section-title">Notifications</div>
+          <div>
+            <label v-for="opt in NOTIFICATION_OPTIONS" :key="opt.key" class="sp-setting-row">
+              <span class="sp-setting-info">
+                <span class="sp-setting-label">{{ opt.label }}</span>
+                <span class="sp-setting-desc">{{ opt.description }}</span>
               </span>
-              <input type="checkbox" :checked="s.enabled" @change="toggleSource(s)" />
+              <input type="checkbox" :checked="notifications[opt.key]" @change="toggleNotification(opt.key)" />
             </label>
+          </div>
+        </div>
+
+        <div class="sp-card">
+          <div class="sp-row">
+            <div style="min-width: 0">
+              <div class="sp-title">AtsuSync Server</div>
+              <div class="sp-muted">Stop the local server and close its terminal</div>
+            </div>
+            <button class="sp-btn danger" :disabled="stoppingServer" @click="stopServer">
+              <Icon name="power" />
+              {{ stoppingServer ? 'Stopping…' : 'Stop Server' }}
+            </button>
           </div>
         </div>
       </template>
     </main>
+    <div v-if="error" class="sp-toast-stack">
+      <AlertBanner kind="error" prefix="sp" variant="toast" dismissible :message="error" @dismiss="error = null" />
+    </div>
     </template>
   </div>
 </template>

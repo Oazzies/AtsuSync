@@ -1,17 +1,21 @@
-import { onUnmounted } from 'vue';
+import { onUnmounted, ref } from 'vue';
 import type {
   AtsuPresence,
+  AtsuSeriesInfo,
   AtsuSeriesState,
   ContentRequest,
   DownloadJob,
   Link,
   LinkChapter,
+  LncrawlStatus,
+  LnreaderStatus,
   MangaBaka,
   ServerEvent,
   Settings,
   SettingsView,
   SourceInfo,
   SourceMatch,
+  SourceSearchFilter,
   SourceSeriesHit,
   SuwayomiExtensionInfo,
   SuwayomiStatus,
@@ -19,6 +23,7 @@ import type {
 
 export type BgRequest =
   | { type: 'api'; method: string; path: string; body?: unknown }
+  | { type: 'fetchCover'; url: string }
   | { type: 'syncCookies' }
   | { type: 'toggleSidePanel' }
   | { type: 'getSidePanelState' };
@@ -108,6 +113,69 @@ export function fetchDownloadFile(jobId: number): Promise<{ bytes: Uint8Array; f
   });
 }
 
+export function fetchCoverDataUrl(url: string): Promise<string> {
+  return chrome.runtime.sendMessage({ type: 'fetchCover', url } satisfies BgRequest).then((res: BgResponse<string>) => {
+    if (!res?.ok) throw new Error(res?.error ?? 'Failed to fetch cover');
+    return res.data;
+  });
+}
+
+/** Resolves `http://` (e.g. local Suwayomi) cover URLs into `data:` URLs via the background worker. */
+export function useCoverResolver() {
+  const resolved = ref<Record<string, string>>({});
+  const failed = new Set<string>();
+  const queued = new Set<string>();
+  const queue: string[] = [];
+  let active = 0;
+  const MAX_CONCURRENT = 6;
+
+  function pump() {
+    while (active < MAX_CONCURRENT && queue.length > 0) {
+      const url = queue.shift()!;
+      active++;
+      void fetchCoverDataUrl(url)
+        .then((dataUrl) => {
+          resolved.value = { ...resolved.value, [url]: dataUrl };
+        })
+        .catch(() => {
+          failed.add(url);
+        })
+        .finally(() => {
+          queued.delete(url);
+          active--;
+          pump();
+        });
+    }
+  }
+
+  function preload(urls: Iterable<string | null | undefined>) {
+    let added = false;
+    for (const url of urls) {
+      if (!url || !url.startsWith('http://')) continue;
+      if (resolved.value[url] || failed.has(url) || queued.has(url)) continue;
+      queued.add(url);
+      queue.push(url);
+      added = true;
+    }
+    if (added) pump();
+  }
+
+  function coverSrc(url: string | null | undefined): string | null {
+    if (!url) return null;
+    if (!url.startsWith('http://')) return url;
+    return resolved.value[url] ?? null;
+  }
+
+  function reset() {
+    resolved.value = {};
+    failed.clear();
+    queued.clear();
+    queue.length = 0;
+  }
+
+  return { coverSrc, preload, reset };
+}
+
 export function syncCookiesNow(): Promise<SettingsView> {
   return chrome.runtime.sendMessage({ type: 'syncCookies' } satisfies BgRequest).then((res: BgResponse<SettingsView>) => {
     if (!res?.ok) throw new Error(res?.error ?? 'Cookie sync failed');
@@ -129,16 +197,18 @@ export function getSidePanelState(): Promise<boolean> {
 export const api = {
   settings: () => call<SettingsView>('GET', '/settings'),
   saveSettings: (patch: Partial<Settings>) => call<SettingsView>('PUT', '/settings', patch),
+  stopServer: () => call<{ ok: boolean }>('POST', '/server/stop'),
 
   requests: () => call<ContentRequest[]>('GET', '/requests'),
-  syncRequests: (full = false) => call<{ added: number; updated: number }>('POST', `/requests/sync${full ? '?full=1' : ''}`),
   request: (id: string) =>
-    call<{ request: ContentRequest; mangabaka: MangaBaka | null; matches: SourceMatch[]; links: Link[] }>('GET', `/requests/${id}`),
+    call<{ request: ContentRequest; mangabaka: MangaBaka | null; atsuSeries: AtsuSeriesInfo | null; matches: SourceMatch[]; links: Link[] }>('GET', `/requests/${id}`),
   updateRequestTitle: (id: string, title: string | null) => call<ContentRequest>('PATCH', `/requests/${id}`, { title }),
+  deleteRequest: (id: string) => call<{ ok: true }>('DELETE', `/requests/${encodeURIComponent(id)}`),
   resolveUpload: (params: { sourceId?: string | null; mangaId?: string | null; mangaBakaId?: string | null; title?: string | null }) =>
     call<{
       request: ContentRequest | null;
       mangabaka: MangaBaka | null;
+      atsuSeries: AtsuSeriesInfo | null;
       matches: SourceMatch[];
       links: Link[];
       resolved: { mangaId: string | null; mangaBakaId: string | null; title: string | null };
@@ -146,7 +216,10 @@ export const api = {
   addSeries: (url: string) => call<ContentRequest>('POST', '/series', { url }),
   requestAtsu: (id: string) => call<AtsuSeriesState>('GET', `/requests/${id}/atsu`),
   checkPresence: (id: string) => call<AtsuPresence>('POST', `/requests/${id}/presence`),
-  findSources: (id: string) => call<SourceMatch[]>('POST', `/requests/${id}/find-sources`),
+  findSources: (id: string, filter?: SourceSearchFilter) =>
+    call<SourceMatch[]>('POST', `/requests/${id}/find-sources`, filter ? { filter } : undefined),
+  stopFindSources: (id: string) =>
+    call<{ stopped: boolean }>('POST', `/requests/${id}/stop-find-sources`),
   checkMangaBaka: (id: string) => call<{ mangabaka: MangaBaka | null; mediumMismatch: boolean }>('POST', `/requests/${id}/mangabaka`),
   addSource: (id: string, url: string) => call<SourceMatch>('POST', `/requests/${id}/add-source`, { url }),
 
@@ -160,6 +233,13 @@ export const api = {
     call<{ count: number; sources: SourceInfo[] }>('POST', `/sources/suwayomi/extensions/${encodeURIComponent(pkgName)}/install`),
   uninstallSuwayomiExtension: (pkgName: string) =>
     call<{ count: number; sources: SourceInfo[] }>('POST', `/sources/suwayomi/extensions/${encodeURIComponent(pkgName)}/uninstall`),
+  lncrawlStatus: () => call<LncrawlStatus>('GET', '/sources/lncrawl/status'),
+  setupLncrawl: () => call<{ status: LncrawlStatus; count: number; sources: SourceInfo[] }>('POST', '/sources/lncrawl/setup'),
+  syncLncrawl: () => call<{ count: number; sources: SourceInfo[] }>('POST', '/sources/lncrawl/sync'),
+  stopLncrawl: () => call<LncrawlStatus>('POST', '/sources/lncrawl/stop'),
+  lnreaderStatus: () => call<LnreaderStatus>('GET', '/sources/lnreader/status'),
+  syncLnreader: () => call<{ status: LnreaderStatus; count: number; sources: SourceInfo[] }>('POST', '/sources/lnreader/sync'),
+  disableLnreader: () => call<{ status: LnreaderStatus; sources: SourceInfo[] }>('POST', '/sources/lnreader/disable'),
   setSourceEnabled: (id: string, enabled: boolean) => call<SourceInfo[]>('PUT', `/sources/${id}`, { enabled }),
   testSource: (id: string, query: string) => call<{ ok: boolean; hits: SourceSeriesHit[]; ms: number }>('POST', `/sources/${id}/test`, { query }),
 

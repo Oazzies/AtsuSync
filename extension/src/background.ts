@@ -1,9 +1,39 @@
-import type { ServerEvent } from '@atsusync/shared';
+import { DEFAULT_NOTIFICATION_SETTINGS, type NotificationSettings, type ServerEvent } from '@atsusync/shared';
 import type { BgRequest, BgResponse } from './api';
 
 const API_BASE = 'http://127.0.0.1:4517/api';
+const NOTIFICATION_SETTINGS_KEY = 'atsuSync.notifications';
 let lastSyncedCookie = '';
 let cookieSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let notificationSettings: NotificationSettings = { ...DEFAULT_NOTIFICATION_SETTINGS };
+let notificationSettingsLoaded: Promise<void> | null = null;
+
+function ensureNotificationSettings(): Promise<void> {
+  if (!notificationSettingsLoaded) {
+    notificationSettingsLoaded = chrome.storage.local
+      .get(NOTIFICATION_SETTINGS_KEY)
+      .then((stored) => {
+        const raw = stored?.[NOTIFICATION_SETTINGS_KEY];
+        if (raw && typeof raw === 'object') {
+          notificationSettings = { ...DEFAULT_NOTIFICATION_SETTINGS, ...(raw as Partial<NotificationSettings>) };
+        }
+      })
+      .catch(() => {});
+  }
+  return notificationSettingsLoaded;
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes[NOTIFICATION_SETTINGS_KEY]) {
+    const raw = changes[NOTIFICATION_SETTINGS_KEY].newValue;
+    notificationSettings =
+      raw && typeof raw === 'object'
+        ? { ...DEFAULT_NOTIFICATION_SETTINGS, ...(raw as Partial<NotificationSettings>) }
+        : { ...DEFAULT_NOTIFICATION_SETTINGS };
+  }
+});
+
+void ensureNotificationSettings();
 
 async function callServer<T>(method: string, path: string, body?: unknown): Promise<BgResponse<T>> {
   try {
@@ -26,7 +56,7 @@ async function callServer<T>(method: string, path: string, body?: unknown): Prom
     return {
       ok: false,
       status: 0,
-      error: msg.includes('Failed to fetch') ? 'AtsuSync server offline (run npm start)' : msg,
+      error: msg.includes('Failed to fetch') ? 'AtsuSync server offline' : msg,
     };
   }
 }
@@ -121,29 +151,30 @@ async function broadcastEvent(event: ServerEvent): Promise<void> {
     }
   }
 
+  await ensureNotificationSettings();
   const iconUrl = chrome.runtime.getURL('icons/icon-120.png');
-  if (event.type === 'new_chapters') {
+  if (event.type === 'new_chapters' && notificationSettings.new_chapters) {
     chrome.notifications.create(`new-${event.linkId}-${Date.now()}`, {
       type: 'basic',
       iconUrl,
       title: `${event.seriesTitle}: ${event.labels.length} new chapter${event.labels.length === 1 ? '' : 's'}`,
       message: event.labels.slice(0, 3).join(', '),
     });
-  } else if (event.type === 'chapters_unlocked') {
+  } else if (event.type === 'chapters_unlocked' && notificationSettings.chapters_unlocked) {
     chrome.notifications.create(`unlocked-${event.linkId}-${Date.now()}`, {
       type: 'basic',
       iconUrl,
       title: `${event.seriesTitle}: ${event.labels.length} unlocked`,
       message: event.labels.slice(0, 3).join(', '),
     });
-  } else if (event.type === 'downloads_complete') {
+  } else if (event.type === 'downloads_complete' && notificationSettings.downloads_complete) {
     chrome.notifications.create(`dl-done-${event.linkId}-${Date.now()}`, {
       type: 'basic',
       iconUrl,
       title: `${event.seriesTitle}: All chapters downloaded`,
       message: `${event.count} chapter ZIP${event.count === 1 ? '' : 's'} ready to attach on upload`,
     });
-  } else if (event.type === 'discovery_done') {
+  } else if (event.type === 'discovery_done' && notificationSettings.discovery_done) {
     chrome.notifications.create(`discovery-${event.requestId}-${Date.now()}`, {
       type: 'basic',
       iconUrl,
@@ -242,10 +273,28 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
+async function fetchCoverDataUrl(url: string): Promise<BgResponse<string>> {
+  try {
+    const res = await fetch(`${API_BASE}/sources/suwayomi/thumbnail?url=${encodeURIComponent(url)}`);
+    if (!res.ok) {
+      return { ok: false, status: res.status, error: `${res.status} ${res.statusText}` };
+    }
+    const mime = res.headers.get('content-type') || 'image/jpeg';
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    return { ok: true, data: `data:${mime};base64,${uint8ToBase64(bytes)}` };
+  } catch (err) {
+    return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg: BgRequest, sender, sendResponse) => {
   void startEventStream();
   if (msg.type === 'api') {
     void callServer(msg.method, msg.path, msg.body).then(sendResponse);
+    return true;
+  }
+  if (msg.type === 'fetchCover') {
+    void fetchCoverDataUrl(msg.url).then(sendResponse);
     return true;
   }
   if (msg.type === 'syncCookies') {

@@ -220,3 +220,145 @@ export function replaceAllPublishedTitles(
     totalInputs: inputs.length,
   };
 }
+
+export interface TitleSnapshotEntry {
+  el: HTMLInputElement | HTMLTextAreaElement;
+  value: string;
+}
+
+export interface TitleInspection {
+  total: number;
+  empty: number;
+  duplicates: number;
+  whitespaceIssues: number;
+  titles: string[];
+}
+
+const MINOR_TITLE_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'as',
+  'at',
+  'but',
+  'by',
+  'for',
+  'from',
+  'in',
+  'into',
+  'nor',
+  'of',
+  'on',
+  'or',
+  'out',
+  'so',
+  'the',
+  'to',
+  'up',
+  'with',
+  'yet',
+]);
+
+export function captureTitleSnapshot(doc: Document = document): TitleSnapshotEntry[] {
+  return findPublishedTitleInputs(doc).map((el) => ({ el, value: el.value }));
+}
+
+export function restoreTitleSnapshot(snapshot: TitleSnapshotEntry[]): number {
+  let restored = 0;
+  for (const entry of snapshot) {
+    if (!entry.el.isConnected) continue;
+    if (entry.el.value !== entry.value) {
+      setNativeInputValue(entry.el, entry.value);
+      restored++;
+    }
+  }
+  return restored;
+}
+
+export function applyBatchTitleTransform(
+  transform: (value: string, index: number) => string,
+  doc: Document = document,
+): { updatedInputs: number; totalInputs: number; snapshot: TitleSnapshotEntry[] } {
+  const inputs = findPublishedTitleInputs(doc);
+  const snapshot: TitleSnapshotEntry[] = [];
+  let updatedInputs = 0;
+
+  inputs.forEach((input, idx) => {
+    const prev = input.value;
+    const next = transform(prev, idx);
+    if (next !== prev) {
+      snapshot.push({ el: input, value: prev });
+      setNativeInputValue(input, next);
+      updatedInputs++;
+    }
+  });
+
+  return {
+    updatedInputs,
+    totalInputs: inputs.length,
+    snapshot,
+  };
+}
+
+export function trimTitleSpaces(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+export function stripTitleTags(text: string): string {
+  return trimTitleSpaces(text.replace(/\[[^\]]*\]|\([^)]*\)/g, ' '));
+}
+
+export function toTitleCase(text: string): string {
+  const cleaned = trimTitleSpaces(text);
+  if (!cleaned) return '';
+  const words = cleaned.split(' ');
+  return words
+    .map((word, idx) => {
+      const lower = word.toLowerCase();
+      if (idx > 0 && idx < words.length - 1 && MINOR_TITLE_WORDS.has(lower)) {
+        return lower;
+      }
+      return lower.replace(/^([^a-zA-Z0-9]*)([a-zA-Z])/, (_, prefix: string, ch: string) => `${prefix}${ch.toUpperCase()}`);
+    })
+    .join(' ');
+}
+
+export function toSentenceCase(text: string): string {
+  const cleaned = trimTitleSpaces(text).toLowerCase();
+  if (!cleaned) return '';
+  return cleaned.replace(/^([^a-zA-Z0-9]*)([a-zA-Z])/, (_, prefix: string, ch: string) => `${prefix}${ch.toUpperCase()}`);
+}
+
+export function inspectPublishedTitles(doc: Document = document): TitleInspection {
+  const inputs = findPublishedTitleInputs(doc);
+  const titles = inputs.map((el) => el.value);
+  let empty = 0;
+  let whitespaceIssues = 0;
+  const seen = new Map<string, number>();
+
+  for (const raw of titles) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      empty++;
+      continue;
+    }
+    if (raw !== trimmed || /\s{2,}/.test(raw)) {
+      whitespaceIssues++;
+    }
+    const key = trimmed.toLowerCase();
+    seen.set(key, (seen.get(key) ?? 0) + 1);
+  }
+
+  let duplicates = 0;
+  for (const count of seen.values()) {
+    if (count > 1) duplicates += count - 1;
+  }
+
+  return {
+    total: inputs.length,
+    empty,
+    duplicates,
+    whitespaceIssues,
+    titles,
+  };
+}

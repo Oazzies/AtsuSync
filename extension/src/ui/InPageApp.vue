@@ -1,10 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { rankSourceMatches, type ContentRequest, type Link, type MangaBaka, type SourceMatch } from '@atsusync/shared';
-import { api, getSidePanelState, START_SERVER_URL, toggleSidePanel, useServerEvents, waitForServerOnline } from '../api';
+import {
+  DEFAULT_SOURCE_SEARCH_FILTER,
+  SOURCE_FILTER_OPTIONS,
+  rankSourceMatches,
+  type AtsuSeriesInfo,
+  type ContentRequest,
+  type Link,
+  type MangaBaka,
+  type SourceMatch,
+  type SourceSearchFilter,
+} from '@atsusync/shared';
+import { api, getSidePanelState, START_SERVER_URL, toggleSidePanel, useCoverResolver, useServerEvents, waitForServerOnline } from '../api';
+import AlertBanner from './AlertBanner.vue';
 import LinkSection from './LinkSection.vue';
 import Icon from './Icon.vue';
-import { previewPublishedTitleReplace, replaceAllPublishedTitles, type PublishedTitlePreview } from './titleReplace';
+import ToolsWindow from './ToolsWindow.vue';
 
 type Route =
   | { kind: 'request'; postId: string }
@@ -33,23 +44,138 @@ function parseRoute(href: string): Route {
 const route = ref<Route>(parseRoute(location.href));
 const collapsed = ref(false);
 const closed = ref(false);
+const dockOpen = computed(() => route.value.kind !== 'other' && !closed.value && !collapsed.value);
 const sidePanelOpen = ref(false);
 const serverOnline = ref(true);
 const starting = ref(false);
 const busy = ref(false);
+const loadingRoute = ref(false);
 let startAbort: AbortController | null = null;
 const error = ref<string | null>(null);
 const notice = ref<string | null>(null);
+let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+watch(notice, (val) => {
+  if (noticeTimer) {
+    clearTimeout(noticeTimer);
+    noticeTimer = null;
+  }
+  if (val) {
+    noticeTimer = setTimeout(() => {
+      notice.value = null;
+      noticeTimer = null;
+    }, 4500);
+  }
+});
 
 // Request / Manga state
 const requestData = ref<ContentRequest | null>(null);
 const mangabaka = ref<MangaBaka | null>(null);
+const atsuSeries = ref<AtsuSeriesInfo | null>(null);
+const seriesCollapsed = ref(false);
+const descExpanded = ref(false);
 const mbMismatch = ref(false);
 const mbChecking = ref(false);
 const matches = ref<SourceMatch[]>([]);
 const brokenCovers = ref(new Set<string>());
+const { coverSrc, preload: preloadCovers, reset: resetCovers } = useCoverResolver();
 const links = ref<Link[]>([]);
-const customSourceUrl = ref('');
+
+function formatLabel(raw: string): string {
+  return raw
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+const seriesCover = computed(() => mangabaka.value?.cover ?? requestData.value?.cover ?? atsuSeries.value?.cover ?? null);
+
+watch([matches, seriesCover], ([list, sc]) => {
+  preloadCovers([sc, ...list.map((m) => m.cover)]);
+}, { immediate: true });
+
+const seriesDescription = computed(() => {
+  const fromMb = mangabaka.value?.description?.trim();
+  if (fromMb) return fromMb;
+  const fromAtsu = atsuSeries.value?.synopsis?.trim();
+  if (fromAtsu) return fromAtsu;
+  const fromReq = requestData.value?.content?.trim();
+  if (fromReq && !/^https?:\/\/\S+$/i.test(fromReq)) return fromReq;
+  return null;
+});
+
+const seriesAtsuId = computed(
+  () => atsuSeries.value?.id ?? requestData.value?.atsuMangaId ?? requestData.value?.presence?.match?.mangaId ?? null,
+);
+
+const seriesAtsuChapters = computed(() => {
+  if (atsuSeries.value) return atsuSeries.value.chapterCount;
+  const m = requestData.value?.presence?.match;
+  if (m && (m.chapterCount > 0 || requestData.value?.presence?.verdict === 'on_atsu')) return m.chapterCount;
+  return null;
+});
+
+const seriesAtsuUrl = computed(() => (seriesAtsuId.value ? `https://atsu.moe/manga/${seriesAtsuId.value}` : null));
+const showOpenOnAtsu = computed(
+  () => !!seriesAtsuUrl.value && !(route.value.kind === 'manga' && route.value.mangaId === seriesAtsuId.value),
+);
+
+const requestStatusLabel = computed(() => {
+  const s = requestData.value?.status;
+  if (!s) return '';
+  if (s === 'cant_add') return "Can't add";
+  if (s === 'looking') return 'Looking into it';
+  return formatLabel(s);
+});
+
+const requestStatusBadgeClass = computed(() => {
+  switch (requestData.value?.status) {
+    case 'added':
+      return 'green';
+    case 'cant_add':
+    case 'duplicate':
+      return 'red';
+    case 'queued':
+    case 'looking':
+      return 'amber';
+    default:
+      return '';
+  }
+});
+
+const mbStatusBadgeClass = computed(() => {
+  switch (mangabaka.value?.status?.toLowerCase()) {
+    case 'completed':
+      return 'green';
+    case 'releasing':
+    case 'ongoing':
+      return 'indigo';
+    case 'hiatus':
+      return 'amber';
+    case 'cancelled':
+    case 'discontinued':
+      return 'red';
+    default:
+      return '';
+  }
+});
+
+const seriesMetaLine = computed(() => {
+  const parts: string[] = [];
+  const type = mangabaka.value?.type ?? atsuSeries.value?.medium ?? null;
+  if (type) parts.push(formatLabel(type));
+  if (mangabaka.value?.year) parts.push(String(mangabaka.value.year));
+  if (mangabaka.value?.authors?.length) parts.push(mangabaka.value.authors.slice(0, 2).join(', '));
+  if (mangabaka.value?.rating != null) parts.push(`★ ${Math.round(mangabaka.value.rating)}%`);
+  return parts.join(' · ');
+});
+
+const seriesGenres = computed(() => (mangabaka.value?.genres ?? []).slice(0, 5).map(formatLabel));
+
+const STATUS_TAG_NAMES = new Set(['open', 'queued', 'looking into it', 'added', "can't add", 'duplicate']);
+const requestExtraTags = computed(() =>
+  (requestData.value?.tags ?? []).filter((t) => !STATUS_TAG_NAMES.has(t.name.trim().toLowerCase())),
+);
 
 // Title editing state (content request)
 const editingTitle = ref(false);
@@ -61,11 +187,57 @@ const searchingSources = ref<{ id: string; name: string }[]>([]);
 const searchTotal = ref(0);
 const searchDone = ref(0);
 
+// Source search filter (persisted in chrome.storage.local; all checked by default)
+const SOURCE_FILTER_KEY = 'atsusync_source_filter';
+const sourceFilter = ref<SourceSearchFilter>({ ...DEFAULT_SOURCE_SEARCH_FILTER });
+const sourceFilterOpen = ref(false);
+const sourceFilterWrapEl = ref<HTMLElement | null>(null);
+const bodyEl = ref<HTMLElement | null>(null);
+
+function onDockWheel(e: WheelEvent) {
+  if (e.ctrlKey) return;
+  e.stopPropagation();
+
+  const el = bodyEl.value;
+  if (!el || el.scrollHeight <= el.clientHeight) {
+    e.preventDefault();
+    return;
+  }
+
+  const target = e.target as Node | null;
+  if (!target || !el.contains(target)) {
+    e.preventDefault();
+    return;
+  }
+
+  // Let native browser smooth scrolling handle .as-body; only block at boundaries
+  // so wheel events don't chain to the underlying page.
+  const dy = e.deltaY;
+  const atTop = el.scrollTop <= 0;
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+  if ((dy < 0 && atTop) || (dy > 0 && atBottom)) {
+    e.preventDefault();
+  }
+}
+const activeFilterCount = computed(() => SOURCE_FILTER_OPTIONS.filter((o) => sourceFilter.value[o.key]).length);
+const isSourceFiltered = computed(() => activeFilterCount.value < SOURCE_FILTER_OPTIONS.length);
+const hasAnyKindSelected = computed(
+  () =>
+    sourceFilter.value.keiyoushi ||
+    sourceFilter.value.lncrawl ||
+    sourceFilter.value.lnreader ||
+    sourceFilter.value.aggregators ||
+    sourceFilter.value.scanlations ||
+    sourceFilter.value.official,
+);
+
 // Dock & pill position/size (persisted in chrome.storage.local)
 const BOUNDS_KEY = 'atsusync_dock_bounds';
 const PILL_KEY = 'atsusync_pill_pos';
 const CLOSED_KEY = 'atsusync_dock_closed';
-const MIN_W = 280;
+const TOOLS_OPEN_KEY = 'atsusync_tools_open';
+const toolsOpen = ref(false);
+const MIN_W = 340;
 const MIN_H = 220;
 const dockEl = ref<HTMLElement | null>(null);
 const dockBounds = ref<{ x: number; y: number; width: number; height: number | null }>({
@@ -123,6 +295,19 @@ function setClosed(val: boolean) {
   }
 }
 
+function setToolsOpen(val: boolean) {
+  toolsOpen.value = val;
+  try {
+    void chrome.storage?.local?.set({ [TOOLS_OPEN_KEY]: val });
+  } catch {
+    /* ignore */
+  }
+}
+
+function toggleTools() {
+  setToolsOpen(!toolsOpen.value);
+}
+
 const pillStyle = computed(() => ({
   left: `${pillPos.value.x}px`,
   top: `${pillPos.value.y}px`,
@@ -168,7 +353,9 @@ const dockStyle = computed(() => {
     top: `${b.y}px`,
     right: 'auto',
     width: `${b.width}px`,
-    ...(b.height !== null ? { height: `${b.height}px` } : { maxHeight: `${Math.max(MIN_H, window.innerHeight - b.y - 16)}px` }),
+    ...(b.height !== null
+      ? { height: `${b.height}px` }
+      : { height: 'auto', maxHeight: `${Math.max(MIN_H, window.innerHeight - b.y - 16)}px` }),
   };
 });
 
@@ -212,8 +399,7 @@ function startResize(dir: ResizeDir, e: PointerEvent) {
   const onMove = (ev: PointerEvent) => {
     const dx = ev.clientX - startX;
     const dy = ev.clientY - startY;
-    let { x, y, width } = orig;
-    let height = origH;
+    let { x, y, width, height } = orig;
 
     if (dir === 'w' || dir === 'sw') {
       const maxW = Math.max(MIN_W, Math.min(820, window.innerWidth - 24));
@@ -250,16 +436,24 @@ function markBrokenCover(url: string) {
 }
 
 // Possible sources filtering & sorting
+const SOURCE_SORT_OPTIONS: { value: 'best' | 'chapters' | 'name'; label: string }[] = [
+  { value: 'best', label: 'Best match' },
+  { value: 'chapters', label: 'Most chapters' },
+  { value: 'name', label: 'Close name' },
+];
+const sourcesCollapsed = ref(false);
 const sourceMatchFilter = ref('');
 const sourceMatchSort = ref<'best' | 'chapters' | 'name'>('best');
-const hideSourceErrors = ref(false);
-
-const hasSourceErrors = computed(() => matches.value.some((m) => !!m.error));
+const sourceSortOpen = ref(false);
+const sourceSortWrapEl = ref<HTMLElement | null>(null);
+const sourceSortLabel = computed(
+  () => SOURCE_SORT_OPTIONS.find((o) => o.value === sourceMatchSort.value)?.label ?? 'Best match',
+);
 
 const filteredMatches = computed(() => {
   const q = sourceMatchFilter.value.trim().toLowerCase();
   let list = matches.value.filter((m) => {
-    if (hideSourceErrors.value && m.error) return false;
+    if (m.error) return false;
     if (!q) return true;
     return m.title.toLowerCase().includes(q) || m.sourceName.toLowerCase().includes(q);
   });
@@ -287,57 +481,6 @@ const filteredMatches = computed(() => {
   return list;
 });
 
-// Published title mass replace state
-const showTitleReplace = ref(false);
-const findTitleText = ref('');
-const replaceTitleText = ref('');
-const replaceMatchCase = ref(false);
-const replaceUseRegex = ref(false);
-const titlePreview = ref<PublishedTitlePreview | null>(null);
-const replaceRegexError = ref<string | null>(null);
-
-function refreshTitlePreview() {
-  if (route.value.kind !== 'upload' || !showTitleReplace.value) {
-    titlePreview.value = null;
-    replaceRegexError.value = null;
-    return;
-  }
-  try {
-    replaceRegexError.value = null;
-    titlePreview.value = previewPublishedTitleReplace(findTitleText.value, replaceTitleText.value, {
-      matchCase: replaceMatchCase.value,
-      useRegex: replaceUseRegex.value,
-    });
-  } catch (e) {
-    replaceRegexError.value = e instanceof Error ? e.message : String(e);
-    titlePreview.value = null;
-  }
-}
-
-watch([showTitleReplace, findTitleText, replaceTitleText, replaceMatchCase, replaceUseRegex], refreshTitlePreview);
-
-function runMassTitleReplace() {
-  if (!findTitleText.value) return;
-  error.value = null;
-  notice.value = null;
-  try {
-    const res = replaceAllPublishedTitles(findTitleText.value, replaceTitleText.value, {
-      matchCase: replaceMatchCase.value,
-      useRegex: replaceUseRegex.value,
-    });
-    if (res.totalInputs === 0) {
-      error.value = 'No editable published title fields found on this page.';
-    } else if (res.updatedInputs === 0) {
-      notice.value = `No matches found across ${res.totalInputs} published title field${res.totalInputs === 1 ? '' : 's'}.`;
-    } else {
-      notice.value = `Replaced ${res.totalOccurrences} occurrence${res.totalOccurrences === 1 ? '' : 's'} across ${res.updatedInputs} title${res.updatedInputs === 1 ? '' : 's'}.`;
-    }
-    refreshTitlePreview();
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
-  }
-}
-
 const activeId = computed(() => {
   if (requestData.value) return requestData.value.id;
   if (route.value.kind === 'request') return route.value.postId;
@@ -355,21 +498,28 @@ let loadSeq = 0;
 
 async function loadRoute() {
   const seq = ++loadSeq;
+  busy.value = false;
+  mbChecking.value = false;
   error.value = null;
   notice.value = null;
   editingTitle.value = false;
   searching.value = false;
   searchingSources.value = [];
   sourceMatchFilter.value = '';
+  sourceSortOpen.value = false;
   requestData.value = null;
   mangabaka.value = null;
+  atsuSeries.value = null;
+  descExpanded.value = false;
   mbMismatch.value = false;
   matches.value = [];
   brokenCovers.value = new Set();
+  resetCovers();
   links.value = [];
 
   if (route.value.kind === 'upload') {
     if (route.value.sourceId || route.value.mangaId || route.value.mangaBakaId) {
+      loadingRoute.value = true;
       try {
         const res = await api.resolveUpload({
           sourceId: route.value.sourceId,
@@ -382,6 +532,7 @@ async function loadRoute() {
         if (res.request) {
           requestData.value = res.request;
           mangabaka.value = res.mangabaka;
+          atsuSeries.value = res.atsuSeries ?? null;
           matches.value = res.matches;
           links.value = res.links;
         }
@@ -389,8 +540,11 @@ async function loadRoute() {
         if (seq !== loadSeq) return;
         const err = e as Error & { status?: number };
         if (err.status === 0) serverOnline.value = false;
+      } finally {
+        if (seq === loadSeq) loadingRoute.value = false;
       }
     } else {
+      loadingRoute.value = false;
       try {
         await api.settings();
         if (seq !== loadSeq) return;
@@ -410,6 +564,7 @@ async function loadRoute() {
         : null;
 
   if (!lookupId) {
+    loadingRoute.value = false;
     try {
       await api.settings();
       if (seq !== loadSeq) return;
@@ -421,12 +576,14 @@ async function loadRoute() {
     return;
   }
 
+  loadingRoute.value = true;
   try {
     const res = await api.request(lookupId);
     if (seq !== loadSeq) return;
     serverOnline.value = true;
     requestData.value = res.request;
     mangabaka.value = res.mangabaka;
+    atsuSeries.value = res.atsuSeries ?? null;
     matches.value = res.matches;
     links.value = res.links;
   } catch (e) {
@@ -437,24 +594,29 @@ async function loadRoute() {
     if (err.status !== 404) {
       error.value = err.message;
     }
+  } finally {
+    if (seq === loadSeq) loadingRoute.value = false;
   }
 }
 
 async function checkMangaBaka() {
   if (!activeId.value) return;
+  const seq = loadSeq;
   mbChecking.value = true;
   error.value = null;
   try {
     const res = await api.checkMangaBaka(activeId.value);
+    if (seq !== loadSeq) return;
     mangabaka.value = res.mangabaka;
     mbMismatch.value = res.mediumMismatch;
     if (!res.mangabaka) {
       notice.value = 'No matching MangaBaka entry found for this medium';
     }
   } catch (e) {
+    if (seq !== loadSeq) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    mbChecking.value = false;
+    if (seq === loadSeq) mbChecking.value = false;
   }
 }
 
@@ -466,72 +628,141 @@ function startEditTitle() {
 
 async function saveTitleOverride(title: string | null) {
   if (!requestData.value) return;
+  const seq = loadSeq;
   busy.value = true;
   error.value = null;
   try {
-    requestData.value = await api.updateRequestTitle(requestData.value.id, title);
+    const updated = await api.updateRequestTitle(requestData.value.id, title);
+    if (seq !== loadSeq) return;
+    requestData.value = updated;
     editingTitle.value = false;
     notice.value = title ? 'Post title updated' : 'Post title reset';
   } catch (e) {
+    if (seq !== loadSeq) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    busy.value = false;
+    if (seq === loadSeq) busy.value = false;
   }
 }
 
+const canUntrack = computed(
+  () => !!requestData.value && (route.value.kind === 'manga' || requestData.value.id.startsWith('atsu:')),
+);
+
 async function trackCurrentManga() {
   if (route.value.kind !== 'manga') return;
+  const seq = loadSeq;
   busy.value = true;
   error.value = null;
   try {
     await api.addSeries(location.href);
+    if (seq !== loadSeq) return;
     await loadRoute();
   } catch (e) {
+    if (seq !== loadSeq) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    busy.value = false;
+    if (seq === loadSeq) busy.value = false;
   }
 }
+
+async function untrackCurrentSeries() {
+  if (!requestData.value || busy.value) return;
+  const seq = loadSeq;
+  busy.value = true;
+  error.value = null;
+  try {
+    await api.deleteRequest(requestData.value.id);
+    if (seq !== loadSeq) return;
+    requestData.value = null;
+    mangabaka.value = null;
+    atsuSeries.value = null;
+    matches.value = [];
+    links.value = [];
+    descExpanded.value = false;
+    mbMismatch.value = false;
+  } catch (e) {
+    if (seq !== loadSeq) return;
+    error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    if (seq === loadSeq) busy.value = false;
+  }
+}
+
+let findStopped = false;
 
 async function findSources() {
-  if (!activeId.value) return;
+  if (!activeId.value || !hasAnyKindSelected.value) return;
+  sourceFilterOpen.value = false;
+  sourcesCollapsed.value = false;
+  const seq = loadSeq;
+  findStopped = false;
+  searching.value = true;
   busy.value = true;
   error.value = null;
   try {
-    matches.value = await api.findSources(activeId.value);
+    const found = await api.findSources(activeId.value, { ...sourceFilter.value });
+    if (seq !== loadSeq) return;
+    if (!findStopped) {
+      matches.value = found;
+    }
   } catch (e) {
+    if (seq !== loadSeq) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    busy.value = false;
+    if (seq === loadSeq) {
+      busy.value = false;
+      searching.value = false;
+      searchingSources.value = [];
+    }
   }
 }
 
-async function addCustomSource() {
-  if (!activeId.value || !customSourceUrl.value.trim()) return;
-  busy.value = true;
-  error.value = null;
+async function stopFindSources() {
+  if (!activeId.value) return;
+  findStopped = true;
+  searching.value = false;
+  searchingSources.value = [];
+  busy.value = false;
   try {
-    const m = await api.addSource(activeId.value, customSourceUrl.value.trim());
-    matches.value = [m, ...matches.value.filter((x) => x.seriesUrl !== m.seriesUrl)];
-    customSourceUrl.value = '';
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    busy.value = false;
+    await api.stopFindSources(activeId.value);
+  } catch {
+    /* ignore */
   }
 }
 
 async function linkSource(m: SourceMatch) {
-  if (!activeId.value) return;
+  if (!activeId.value || busy.value) return;
+  const seq = loadSeq;
   busy.value = true;
   error.value = null;
   try {
-    await api.createLink(activeId.value, m.sourceId, m.seriesUrl);
-    await loadRoute();
+    const created = await api.createLink(activeId.value, m.sourceId, m.seriesUrl);
+    if (seq !== loadSeq) return;
+    links.value = [...links.value.filter((l) => l.id !== created.id), created];
   } catch (e) {
+    if (seq !== loadSeq) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    busy.value = false;
+    if (seq === loadSeq) busy.value = false;
+  }
+}
+
+function onLinkUnlinked(linkId: number) {
+  links.value = links.value.filter((l) => l.id !== linkId);
+}
+
+async function refreshLinks() {
+  if (!activeId.value) return;
+  const seq = loadSeq;
+  try {
+    const res = await api.request(activeId.value);
+    if (seq !== loadSeq) return;
+    requestData.value = res.request;
+    atsuSeries.value = res.atsuSeries ?? null;
+    links.value = res.links;
+  } catch {
+    /* ignore transient background refresh errors */
   }
 }
 
@@ -545,24 +776,99 @@ function checkUrlChange() {
   }
 }
 
-function onRuntimeMessage(msg: unknown) {
+function onRuntimeMessage(
+  msg: unknown,
+  _sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: unknown) => void,
+) {
   if (!msg || typeof msg !== 'object') return;
   const m = msg as { type?: string; open?: boolean };
   if (m.type === 'summonDock') {
     setClosed(false);
     collapsed.value = false;
     void loadRoute();
+    sendResponse({ open: dockOpen.value });
+  } else if (m.type === 'toggleDock') {
+    if (dockOpen.value) {
+      setClosed(true);
+    } else {
+      setClosed(false);
+      collapsed.value = false;
+      void loadRoute();
+    }
+    sendResponse({ open: dockOpen.value });
+  } else if (m.type === 'getDockState') {
+    sendResponse({ open: dockOpen.value, toolsOpen: toolsOpen.value });
+  } else if (m.type === 'summonTools') {
+    setToolsOpen(true);
+    sendResponse({ open: toolsOpen.value });
+  } else if (m.type === 'toggleTools') {
+    toggleTools();
+    sendResponse({ open: toolsOpen.value });
+  } else if (m.type === 'getToolsState') {
+    sendResponse({ open: toolsOpen.value });
   } else if (m.type === 'sidePanelState' && typeof m.open === 'boolean') {
     sidePanelOpen.value = m.open;
   }
 }
 
+watch(dockOpen, (open) => {
+  try {
+    void chrome.runtime.sendMessage({ type: 'dockState', open }).catch(() => {});
+  } catch {
+    /* ignore */
+  }
+});
+
+watch(toolsOpen, (open) => {
+  try {
+    void chrome.runtime.sendMessage({ type: 'toolsState', open }).catch(() => {});
+  } catch {
+    /* ignore */
+  }
+});
+
+function onDocPointerDown(e: PointerEvent) {
+  const path = e.composedPath();
+  if (sourceFilterOpen.value) {
+    const wrap = sourceFilterWrapEl.value;
+    if (wrap && !path.includes(wrap)) {
+      sourceFilterOpen.value = false;
+    }
+  }
+  if (sourceSortOpen.value) {
+    const wrap = sourceSortWrapEl.value;
+    if (wrap && !path.includes(wrap)) {
+      sourceSortOpen.value = false;
+    }
+  }
+}
+
+function onDocKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    sourceFilterOpen.value = false;
+    sourceSortOpen.value = false;
+  }
+}
+
+watch(
+  sourceFilter,
+  (val) => {
+    try {
+      void chrome.storage?.local?.set({ [SOURCE_FILTER_KEY]: { ...val } });
+    } catch {
+      /* ignore */
+    }
+  },
+  { deep: true },
+);
+
 onMounted(async () => {
   try {
-    const stored = await chrome.storage?.local?.get([BOUNDS_KEY, PILL_KEY, CLOSED_KEY]);
+    const stored = await chrome.storage?.local?.get([BOUNDS_KEY, PILL_KEY, CLOSED_KEY, TOOLS_OPEN_KEY, SOURCE_FILTER_KEY]);
     const saved = stored?.[BOUNDS_KEY] as { x: number; y: number; width: number; height: number | null } | undefined;
     if (saved && typeof saved.x === 'number' && typeof saved.y === 'number' && typeof saved.width === 'number') {
-      dockBounds.value = clampBounds(saved);
+      dockBounds.value = clampBounds({ x: saved.x, y: saved.y, width: saved.width, height: null });
     }
     const savedPill = stored?.[PILL_KEY] as { x: number; y: number } | undefined;
     if (savedPill && typeof savedPill.x === 'number' && typeof savedPill.y === 'number') {
@@ -570,6 +876,13 @@ onMounted(async () => {
     }
     if (typeof stored?.[CLOSED_KEY] === 'boolean') {
       closed.value = stored[CLOSED_KEY] as boolean;
+    }
+    if (typeof stored?.[TOOLS_OPEN_KEY] === 'boolean') {
+      toolsOpen.value = stored[TOOLS_OPEN_KEY] as boolean;
+    }
+    const savedFilter = stored?.[SOURCE_FILTER_KEY] as Partial<SourceSearchFilter> | undefined;
+    if (savedFilter && typeof savedFilter === 'object') {
+      sourceFilter.value = { ...DEFAULT_SOURCE_SEARCH_FILTER, ...savedFilter };
     }
   } catch {
     /* ignore */
@@ -579,6 +892,8 @@ onMounted(async () => {
   void loadRoute();
   window.addEventListener('popstate', checkUrlChange);
   window.addEventListener('resize', onWindowResize);
+  window.addEventListener('pointerdown', onDocPointerDown, true);
+  window.addEventListener('keydown', onDocKeyDown);
   urlCheckTimer = setInterval(checkUrlChange, 400);
 });
 
@@ -586,7 +901,10 @@ onUnmounted(() => {
   chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   window.removeEventListener('popstate', checkUrlChange);
   window.removeEventListener('resize', onWindowResize);
+  window.removeEventListener('pointerdown', onDocPointerDown, true);
+  window.removeEventListener('keydown', onDocKeyDown);
   if (urlCheckTimer) clearInterval(urlCheckTimer);
+  if (noticeTimer) clearTimeout(noticeTimer);
   startAbort?.abort();
 });
 
@@ -630,7 +948,8 @@ useServerEvents((ev) => {
 </script>
 
 <template>
-  <template v-if="route.kind !== 'other' && !closed">
+  <template v-if="route.kind !== 'other'">
+    <template v-if="!closed">
     <button
       v-if="collapsed"
       class="as-pill"
@@ -641,7 +960,7 @@ useServerEvents((ev) => {
       <span class="as-wordmark">Atsu<span>Sync</span></span>
     </button>
 
-    <div v-else ref="dockEl" class="as-dock" :style="dockStyle">
+    <div v-else ref="dockEl" class="as-dock" :style="dockStyle" @wheel="onDockWheel">
     <div class="as-resize as-resize-w" @pointerdown="startResize('w', $event)" />
     <div class="as-resize as-resize-e" @pointerdown="startResize('e', $event)" />
     <div class="as-resize as-resize-s" @pointerdown="startResize('s', $event)" />
@@ -658,7 +977,16 @@ useServerEvents((ev) => {
       </div>
       <div class="as-header-actions">
         <button
-          class="as-btn icon"
+          class="as-icon-btn"
+          :title="toolsOpen ? 'Hide Tools' : 'Open Tools'"
+          :aria-label="toolsOpen ? 'Hide Tools' : 'Open Tools'"
+          :aria-pressed="toolsOpen"
+          @click="toggleTools"
+        >
+          <Icon name="wrench" />
+        </button>
+        <button
+          class="as-icon-btn"
           :title="sidePanelOpen ? 'Collapse Side Panel' : 'Open Side Panel'"
           :aria-label="sidePanelOpen ? 'Collapse Side Panel' : 'Open Side Panel'"
           @click="toggleSidePanel"
@@ -670,7 +998,7 @@ useServerEvents((ev) => {
       </div>
     </div>
 
-    <div class="as-body">
+    <div ref="bodyEl" class="as-body">
       <div v-if="!serverOnline" class="as-offline-screen">
         <a
           :href="START_SERVER_URL"
@@ -685,82 +1013,51 @@ useServerEvents((ev) => {
       </div>
 
       <template v-else>
-      <div v-if="error" class="as-error">{{ error }}</div>
-      <div v-if="notice" class="as-ok">{{ notice }}</div>
-
-      <!-- UPLOAD PAGE: Published Title Replace & unresolved hint -->
-      <template v-if="route.kind === 'upload'">
-        <div v-if="!requestData" class="as-card">
-          <div class="as-muted">Open a tracked series upload page (from a tracked series) to manage and attach its ready downloads.</div>
+      <!-- LOADING SKELETON -->
+      <template v-if="loadingRoute">
+        <div class="as-card as-series-card" aria-busy="true" aria-label="Loading series info">
+          <div class="as-series-topbar">
+            <div class="as-skel as-skel-pill" />
+            <div class="as-series-top-actions">
+              <div class="as-skel" style="width: 44px; height: 24px; border-radius: 6px" />
+              <div class="as-skel" style="width: 24px; height: 24px; border-radius: 6px" />
+            </div>
+          </div>
+          <div class="as-series-hero">
+            <div class="as-skel as-skel-cover" />
+            <div class="as-series-head">
+              <div class="as-skel as-skel-line lg" style="width: 82%" />
+              <div class="as-skel as-skel-line" style="width: 55%" />
+              <div class="as-row-wrap" style="margin-top: 4px">
+                <div class="as-skel as-skel-pill" />
+                <div class="as-skel as-skel-pill" style="width: 72px" />
+              </div>
+            </div>
+          </div>
+          <div class="as-skel as-skel-line" style="width: 100%; margin-top: 2px" />
+          <div class="as-skel as-skel-line" style="width: 78%" />
         </div>
 
-        <div class="as-card">
+        <div class="as-card" aria-hidden="true">
           <div class="as-row">
-            <span class="as-title">Published Title Replace</span>
-            <button class="as-btn sm" @click="showTitleReplace = !showTitleReplace">
-              {{ showTitleReplace ? 'Hide' : 'Open' }}
-            </button>
+            <div class="as-skel as-skel-line lg" style="width: 76px" />
+            <div class="as-skel" style="width: 110px; height: 26px; border-radius: 8px" />
           </div>
+          <div class="as-skel as-skel-row" />
+          <div class="as-skel as-skel-row" style="height: 54px" />
+          <div class="as-skel as-skel-row" style="height: 54px" />
+        </div>
+      </template>
 
-          <template v-if="showTitleReplace">
-            <input
-              v-model="findTitleText"
-              class="as-input"
-              placeholder="Find text…"
-              @keyup.enter="runMassTitleReplace"
-            />
-            <input
-              v-model="replaceTitleText"
-              class="as-input"
-              placeholder="Replace with (leave empty to remove)…"
-              @keyup.enter="runMassTitleReplace"
-            />
-            <div class="as-row">
-              <div class="as-row-wrap">
-                <label class="as-check-label">
-                  <input v-model="replaceMatchCase" type="checkbox" />
-                  <span>Match case</span>
-                </label>
-                <label class="as-check-label">
-                  <input v-model="replaceUseRegex" type="checkbox" />
-                  <span>Regex</span>
-                </label>
-              </div>
-              <button class="as-btn icon sm" title="Rescan published titles" aria-label="Rescan published titles" @click="refreshTitlePreview">
-                <Icon name="refresh" />
-              </button>
-            </div>
-
-            <div v-if="replaceRegexError" class="as-error">{{ replaceRegexError }}</div>
-            <div v-else-if="titlePreview" class="as-muted">
-              {{ titlePreview.totalInputs }} title field{{ titlePreview.totalInputs === 1 ? '' : 's' }} found
-              <template v-if="findTitleText">
-                · {{ titlePreview.matchingInputs }} matching ({{ titlePreview.totalOccurrences }} occurrence{{ titlePreview.totalOccurrences === 1 ? '' : 's' }})
-              </template>
-            </div>
-
-            <div v-if="titlePreview?.sample" class="as-chap" style="flex-direction: column; align-items: stretch; gap: 2px; padding: 8px 10px">
-              <div class="as-muted" style="text-decoration: line-through; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" :title="titlePreview.sample.before">
-                {{ titlePreview.sample.before }}
-              </div>
-              <div class="as-chap-name" :title="titlePreview.sample.after">
-                {{ titlePreview.sample.after || '(empty)' }}
-              </div>
-            </div>
-
-            <button
-              class="as-btn primary"
-              :disabled="busy || !findTitleText || !!replaceRegexError || (titlePreview?.matchingInputs ?? 0) === 0"
-              @click="runMassTitleReplace"
-            >
-              <Icon name="edit" /> Replace All
-            </button>
-          </template>
+      <!-- UPLOAD PAGE: unresolved hint -->
+      <template v-else-if="route.kind === 'upload' && !requestData">
+        <div class="as-card">
+          <div class="as-muted">Open a tracked series upload page (from a tracked series) to manage and attach its ready downloads.</div>
         </div>
       </template>
 
       <!-- MANGA PAGE NOT YET TRACKED -->
-      <template v-if="route.kind === 'manga' && !requestData && serverOnline">
+      <template v-else-if="route.kind === 'manga' && !requestData && serverOnline">
         <div class="as-card">
           <div class="as-muted">This series isn't tracked in AtsuSync yet.</div>
           <button class="as-btn primary" :disabled="busy" @click="trackCurrentManga"><Icon name="plus" /> Track in AtsuSync</button>
@@ -768,54 +1065,165 @@ useServerEvents((ev) => {
       </template>
 
       <!-- REQUEST, TRACKED MANGA, OR RESOLVED UPLOAD SERIES -->
-      <template v-if="requestData">
-        <div class="as-card">
-          <div v-if="!editingTitle" class="as-row">
-            <div class="as-title" :title="requestData.title">{{ requestData.title }}</div>
-            <button
-              v-if="route.kind === 'request'"
-              class="as-btn icon sm"
-              title="Overwrite post title"
-              aria-label="Overwrite post title"
-              @click="startEditTitle"
-            >
-              <Icon name="edit" />
-            </button>
-          </div>
-          <div v-else class="as-card" style="padding: 0; gap: 6px">
-            <input
-              v-model="titleDraft"
-              class="as-input"
-              placeholder="Enter series title…"
-              @keyup.enter="saveTitleOverride(titleDraft)"
-              @keyup.escape="editingTitle = false"
-            />
-            <div class="as-row-wrap">
-              <button class="as-btn primary sm" :disabled="busy" @click="saveTitleOverride(titleDraft)">Save</button>
-              <button v-if="requestData.customTitle" class="as-btn sm" :disabled="busy" @click="saveTitleOverride(null)">Reset</button>
-              <button class="as-btn sm" @click="editingTitle = false">Cancel</button>
+      <template v-else-if="requestData">
+        <div class="as-card as-series-card">
+          <div class="as-series-topbar">
+            <div class="as-row-wrap" style="gap: 5px">
+              <span v-if="route.kind === 'request' || !requestData.atsuMangaId" class="as-badge" :class="requestStatusBadgeClass">
+                {{ requestStatusLabel }}
+              </span>
+              <span v-if="requestData.presence?.verdict === 'on_atsu'" class="as-badge green">Already on Atsu</span>
+              <span v-else-if="requestData.presence?.verdict === 'claimed'" class="as-badge amber">Claimed</span>
+              <span v-else-if="requestData.presence?.verdict === 'possible'" class="as-badge amber">Possible match</span>
+            </div>
+            <div class="as-series-top-actions">
+              <a
+                v-if="mangabaka?.url"
+                class="as-mini-btn"
+                :href="mangabaka.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="`Open on MangaBaka${mangabaka.type ? ` (${mangabaka.type})` : ''}`"
+              >
+                <Icon name="external" />
+                <span>MB</span>
+              </a>
+              <a
+                v-if="showOpenOnAtsu && seriesAtsuUrl"
+                class="as-mini-btn"
+                :href="seriesAtsuUrl"
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open on Atsu"
+              >
+                <Icon name="external" />
+                <span>Atsu</span>
+              </a>
+              <button
+                class="as-icon-btn"
+                :disabled="mbChecking"
+                :title="mbChecking ? 'Checking MangaBaka…' : (mangabaka ? 'Refresh MangaBaka' : 'Check MangaBaka')"
+                :aria-label="mbChecking ? 'Checking MangaBaka' : (mangabaka ? 'Refresh MangaBaka' : 'Check MangaBaka')"
+                @click="checkMangaBaka"
+              >
+                <Icon name="refresh" :class="{ 'as-spin': mbChecking }" />
+              </button>
+              <button
+                class="as-icon-btn"
+                :title="seriesCollapsed ? 'Expand' : 'Collapse'"
+                :aria-label="seriesCollapsed ? 'Expand' : 'Collapse'"
+                :aria-expanded="!seriesCollapsed"
+                @click="seriesCollapsed = !seriesCollapsed"
+              >
+                <Icon name="chevronDown" class="as-chevron" :class="{ open: !seriesCollapsed }" />
+              </button>
             </div>
           </div>
 
-          <div class="as-row-wrap">
-            <span class="as-badge">{{ requestData.status }}</span>
-            <span v-if="requestData.presence?.verdict === 'on_atsu'" class="as-badge green">Already on Atsu</span>
-            <span v-else-if="requestData.presence?.verdict === 'claimed'" class="as-badge amber">Claimed</span>
-            <span v-else-if="requestData.presence?.verdict === 'possible'" class="as-badge amber">Possible match</span>
-            <span v-if="mangabaka" class="as-badge indigo" :title="mangabaka.title">
-              MB: {{ mangabaka.totalChapters ?? '?' }} ch<template v-if="mangabaka.status"> · {{ mangabaka.status }}</template>
-            </span>
-          </div>
-          <div v-if="mbMismatch" class="as-warn">
-            Linked MangaBaka entry is "{{ mangabaka?.type }}", which does not match this request's medium.
-          </div>
-          <div class="as-row-wrap">
-            <button class="as-btn" :disabled="mbChecking" @click="checkMangaBaka">
-              <Icon name="refresh" /> {{ mbChecking ? 'Checking MB…' : (mangabaka ? 'Refresh MB' : 'Check MangaBaka') }}
-            </button>
-            <a v-if="mangabaka?.url" class="as-btn" :href="mangabaka.url" target="_blank" rel="noopener noreferrer">
-              <Icon name="external" /> MangaBaka<template v-if="mangabaka.type"> ({{ mangabaka.type }})</template>
-            </a>
+          <div class="as-collapse" :class="{ collapsed: seriesCollapsed }">
+            <div class="as-collapse-inner">
+              <div class="as-collapse-body">
+                <div class="as-series-hero">
+                  <img
+                    v-if="coverSrc(seriesCover) && !brokenCovers.has(`series:${seriesCover}`)"
+                    :src="coverSrc(seriesCover)!"
+                    :alt="requestData.title"
+                    class="as-series-cover"
+                    referrerpolicy="no-referrer"
+                    @error="markBrokenCover(`series:${seriesCover}`)"
+                  />
+                  <div v-else class="as-series-cover-fallback" aria-hidden="true">
+                    <Icon name="book" />
+                  </div>
+
+                  <div class="as-series-head">
+                    <div v-if="!editingTitle" class="as-series-title-row">
+                      <div class="as-series-title" :title="requestData.title">{{ requestData.title }}</div>
+                      <button
+                        v-if="route.kind === 'request'"
+                        class="as-icon-btn"
+                        title="Overwrite post title"
+                        aria-label="Overwrite post title"
+                        @click="startEditTitle"
+                      >
+                        <Icon name="edit" />
+                      </button>
+                    </div>
+                    <div v-else class="as-card" style="padding: 0; gap: 6px; background: transparent">
+                      <input
+                        v-model="titleDraft"
+                        class="as-input"
+                        placeholder="Enter series title…"
+                        @keyup.enter="saveTitleOverride(titleDraft)"
+                        @keyup.escape="editingTitle = false"
+                      />
+                      <div class="as-row-wrap">
+                        <button class="as-btn primary sm" :disabled="busy" @click="saveTitleOverride(titleDraft)">Save</button>
+                        <button v-if="requestData.customTitle" class="as-btn sm" :disabled="busy" @click="saveTitleOverride(null)">Reset</button>
+                        <button class="as-btn sm" @click="editingTitle = false">Cancel</button>
+                      </div>
+                    </div>
+
+                    <div v-if="seriesMetaLine" class="as-series-meta">{{ seriesMetaLine }}</div>
+
+                    <div class="as-series-badges">
+                      <span v-if="mangabaka?.status" class="as-badge" :class="mbStatusBadgeClass">
+                        {{ formatLabel(mangabaka.status) }}
+                      </span>
+                      <span v-if="seriesAtsuChapters !== null" class="as-badge">
+                        Atsu: {{ seriesAtsuChapters }} ch
+                      </span>
+                      <span v-if="mangabaka?.totalChapters != null" class="as-badge indigo" :title="mangabaka.title">
+                        MB: {{ mangabaka.totalChapters }} ch
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-if="seriesGenres.length || requestExtraTags.length" class="as-source-chips">
+                  <span v-for="t in requestExtraTags" :key="`tag-${t.id}`" class="as-series-chip">
+                    <template v-if="t.emoji">{{ t.emoji }} </template>{{ t.name }}
+                  </span>
+                  <span v-for="g in seriesGenres" :key="`genre-${g}`" class="as-series-chip">{{ g }}</span>
+                </div>
+
+                <div v-if="seriesDescription" class="as-series-desc-wrap">
+                  <div class="as-series-desc" :class="{ clamped: !descExpanded }">{{ seriesDescription }}</div>
+                  <button
+                    v-if="seriesDescription.length > 140"
+                    type="button"
+                    class="as-btn ghost sm as-desc-toggle"
+                    @click="descExpanded = !descExpanded"
+                  >
+                    {{ descExpanded ? 'Show less' : 'Show more' }}
+                  </button>
+                </div>
+
+                <div v-if="(route.kind === 'request' && (requestData.authorName || requestData.commentCount > 0)) || canUntrack" class="as-series-footer">
+                  <span v-if="route.kind === 'request' && (requestData.authorName || requestData.commentCount > 0)">
+                    <template v-if="requestData.authorName">Requested by {{ requestData.authorName }}</template>
+                    <template v-if="requestData.authorName && requestData.commentCount > 0"> · </template>
+                    <template v-if="requestData.commentCount > 0">{{ requestData.commentCount }} {{ requestData.commentCount === 1 ? 'comment' : 'comments' }}</template>
+                  </span>
+                  <button
+                    v-if="canUntrack"
+                    class="as-btn danger sm"
+                    style="margin-left: auto"
+                    :disabled="busy"
+                    title="Untrack series"
+                    @click="untrackCurrentSeries"
+                  >
+                    <Icon name="trash" /> Untrack
+                  </button>
+                </div>
+
+                <AlertBanner
+                  v-if="mbMismatch"
+                  kind="warn"
+                  :message="`Linked MangaBaka entry is &quot;${mangabaka?.type}&quot;, which does not match this request's medium.`"
+                />
+              </div>
+            </div>
           </div>
         </div>
 
@@ -824,15 +1232,59 @@ useServerEvents((ev) => {
           :key="l.id"
           :link="l"
           :is-upload-page="route.kind === 'upload'"
-          @unlinked="loadRoute"
-          @updated="loadRoute"
+          @unlinked="onLinkUnlinked"
+          @updated="refreshLinks"
         />
 
         <div class="as-card">
-          <div class="as-row">
-            <span class="as-title">Sources</span>
-            <button class="as-btn primary" :disabled="busy || searching" @click="findSources">
-              <Icon name="search" /> {{ searching ? `Searching (${searchDone}/${searchTotal})…` : 'Find sources' }}
+          <div class="as-row" style="align-items: flex-start">
+            <span class="as-title" style="flex: 1; min-width: 0">Sources</span>
+            <button
+              class="as-icon-btn"
+              :title="sourcesCollapsed ? 'Expand' : 'Collapse'"
+              :aria-label="sourcesCollapsed ? 'Expand' : 'Collapse'"
+              :aria-expanded="!sourcesCollapsed"
+              @click="sourcesCollapsed = !sourcesCollapsed"
+            >
+              <Icon name="chevronDown" class="as-chevron" :class="{ open: !sourcesCollapsed }" />
+            </button>
+          </div>
+
+          <template v-if="!sourcesCollapsed">
+          <div class="as-row-wrap" style="justify-content: flex-end">
+            <div ref="sourceFilterWrapEl" class="as-filter-wrap">
+              <button
+                type="button"
+                class="as-btn sm"
+                :class="{ 'as-filter-active': isSourceFiltered }"
+                :aria-expanded="sourceFilterOpen"
+                title="Filter which sources to search"
+                @click="sourceFilterOpen = !sourceFilterOpen"
+              >
+                <Icon name="filter" />
+                <span v-if="isSourceFiltered">{{ activeFilterCount }}/{{ SOURCE_FILTER_OPTIONS.length }}</span>
+              </button>
+              <div v-if="sourceFilterOpen" class="as-filter-menu right" role="menu" aria-label="Source filter">
+                <label v-for="opt in SOURCE_FILTER_OPTIONS" :key="opt.key" class="as-filter-item">
+                  <input v-model="sourceFilter[opt.key]" type="checkbox" />
+                  <span>{{ opt.label }}</span>
+                </label>
+              </div>
+            </div>
+            <button
+              v-if="searching"
+              class="as-btn danger sm"
+              @click="stopFindSources"
+            >
+              <Icon name="x" /> Stop<template v-if="searchTotal"> ({{ searchDone }}/{{ searchTotal }})</template>
+            </button>
+            <button
+              v-else
+              class="as-btn primary sm"
+              :disabled="busy || !hasAnyKindSelected"
+              @click="findSources"
+            >
+              <Icon name="search" /> Find sources
             </button>
           </div>
 
@@ -845,48 +1297,61 @@ useServerEvents((ev) => {
             </div>
           </template>
 
-          <div class="as-row">
-            <input
-              v-model="customSourceUrl"
-              class="as-input"
-              placeholder="Paste series URL from any supported site…"
-              @keyup.enter="addCustomSource"
-            />
-            <button class="as-btn" :disabled="busy || !customSourceUrl.trim()" @click="addCustomSource"><Icon name="plus" /> Add</button>
-          </div>
-
-          <div v-if="matches.length > 0" class="as-row" style="gap: 6px">
+          <div v-if="matches.length > 0" class="as-row" style="gap: 6px; flex-wrap: wrap">
             <input
               v-model="sourceMatchFilter"
               class="as-input"
               type="search"
               placeholder="Filter matches…"
-              style="flex: 1; height: 30px; font-size: 12px"
+              style="flex: 1; min-width: 120px; height: 30px; font-size: 12px"
             />
-            <select
-              v-model="sourceMatchSort"
-              class="as-input"
-              aria-label="Sort sources"
-              style="width: auto; height: 30px; padding: 0 8px; font-size: 12px"
-            >
-              <option value="best">Best match</option>
-              <option value="chapters">Most chapters</option>
-              <option value="name">Close name</option>
-            </select>
+            <div ref="sourceSortWrapEl" class="as-filter-wrap">
+              <button
+                type="button"
+                class="as-btn sm"
+                :aria-expanded="sourceSortOpen"
+                aria-label="Sort sources"
+                style="height: 30px"
+                @click="sourceSortOpen = !sourceSortOpen"
+              >
+                <span>{{ sourceSortLabel }}</span>
+                <Icon name="chevronDown" class="as-chevron" :class="{ open: sourceSortOpen }" />
+              </button>
+              <div v-if="sourceSortOpen" class="as-filter-menu right" role="menu" aria-label="Sort sources">
+                <button
+                  v-for="opt in SOURCE_SORT_OPTIONS"
+                  :key="opt.value"
+                  type="button"
+                  role="menuitemradio"
+                  :aria-checked="sourceMatchSort === opt.value"
+                  class="as-filter-item as-filter-opt"
+                  :class="{ active: sourceMatchSort === opt.value }"
+                  @click="sourceMatchSort = opt.value; sourceSortOpen = false"
+                >
+                  <span>{{ opt.label }}</span>
+                </button>
+              </div>
+            </div>
           </div>
-          <label v-if="hasSourceErrors" class="as-check-label">
-            <input v-model="hideSourceErrors" type="checkbox" />
-            <span>Hide failed sources</span>
-          </label>
-
-          <div v-if="matches.length > 0 && !filteredMatches.length" class="as-muted">
+          <div v-if="filteredMatches.length === 0 && sourceMatchFilter.trim()" class="as-muted">
             No sources match "{{ sourceMatchFilter }}".
           </div>
 
+          <template v-if="searching && matches.length === 0">
+            <div v-for="n in 3" :key="`skel-src-${n}`" class="as-chap" aria-hidden="true">
+              <div class="as-skel as-skel-thumb" />
+              <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+                <div class="as-skel as-skel-line" style="width: 74%" />
+                <div class="as-skel as-skel-line sm" style="width: 48%" />
+              </div>
+              <div class="as-skel" style="width: 56px; height: 28px; border-radius: 8px" />
+            </div>
+          </template>
+
           <div v-for="m in filteredMatches" :key="m.seriesUrl" class="as-chap" style="align-items: center">
             <img
-              v-if="m.cover && !brokenCovers.has(m.seriesUrl)"
-              :src="m.cover"
+              v-if="coverSrc(m.cover) && !brokenCovers.has(m.seriesUrl)"
+              :src="coverSrc(m.cover)!"
               :alt="m.title"
               class="as-cover-thumb"
               loading="lazy"
@@ -909,7 +1374,7 @@ useServerEvents((ev) => {
               :href="m.seriesUrl"
               target="_blank"
               rel="noopener noreferrer"
-              class="as-btn icon"
+              class="as-icon-btn"
               title="Open source"
               aria-label="Open source"
             >
@@ -925,10 +1390,32 @@ useServerEvents((ev) => {
             </button>
             <span v-else class="as-badge green">Linked</span>
           </div>
+          </template>
         </div>
       </template>
       </template>
     </div>
+
+    <div v-if="error || notice" class="as-toast-stack">
+      <AlertBanner
+        v-if="error"
+        kind="error"
+        variant="toast"
+        dismissible
+        :message="error"
+        @dismiss="error = null"
+      />
+      <AlertBanner
+        v-if="notice"
+        kind="ok"
+        variant="toast"
+        dismissible
+        :message="notice"
+        @dismiss="notice = null"
+      />
+    </div>
   </div>
+  </template>
+  <ToolsWindow :open="toolsOpen" :route-kind="route.kind" @close="setToolsOpen(false)" />
   </template>
 </template>

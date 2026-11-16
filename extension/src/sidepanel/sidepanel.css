@@ -41,6 +41,7 @@ html, body, #app {
 ::-webkit-scrollbar-thumb:hover { background: var(--slate4); }
 
 .sp-shell {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -93,16 +94,54 @@ html, body, #app {
 
 /* Pill tab group, as on atsu.moe's chapter filters */
 .sp-tabs-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 10px 12px 0;
   flex-shrink: 0;
 }
 
 .sp-tabs {
+  flex: 1;
+  min-width: 0;
   display: flex;
   padding: 4px;
   gap: 4px;
   background: var(--slate3);
   border-radius: 10px;
+}
+
+.sp-tabs-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sp-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg3);
+  font-family: inherit;
+  font-size: 15px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.sp-icon-btn:hover:not(:disabled) {
+  color: var(--fg2);
+  background: rgba(255, 255, 255, 0.06);
+}
+.sp-icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .sp-tab {
@@ -184,9 +223,14 @@ html, body, #app {
   font-size: 13px;
   outline: none;
 }
+.sp-card .sp-input {
+  background: var(--slate3);
+  border-color: transparent;
+}
 .sp-input.with-icon { padding-left: 32px; }
 .sp-input::placeholder { color: var(--fg3); }
-.sp-input:focus-visible { border-color: var(--accent); }
+.sp-input:focus-visible,
+.sp-card .sp-input:focus-visible { border-color: var(--accent); }
 
 .sp-section-title {
   font-size: 14px;
@@ -418,6 +462,82 @@ html, body, #app {
   to { transform: rotate(360deg); }
 }
 
+.sp-toast-stack {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+.sp-toast-stack > * {
+  pointer-events: auto;
+}
+
+.sp-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.sp-alert.error,
+.sp-error {
+  background: #9f0712;
+  border: 1px solid #c1121f;
+  color: #fff;
+}
+.sp-alert.ok,
+.sp-ok {
+  background: #209928;
+  border: 1px solid #2ab533;
+  color: #fff;
+}
+.sp-alert.warn,
+.sp-warn {
+  background: #805e03;
+  border: 1px solid #a17704;
+  color: #fff;
+}
+
+.sp-alert-toast {
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+}
+
+.sp-alert-msg {
+  flex: 1;
+  min-width: 0;
+}
+
+.sp-alert-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  margin: -1px -2px -1px 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+.sp-alert-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .sp-error,
 .sp-ok,
 .sp-warn {
@@ -426,9 +546,6 @@ html, body, #app {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
-.sp-error { background: rgba(242, 138, 138, 0.12); color: var(--red); }
-.sp-ok { background: rgba(5, 223, 114, 0.1); color: var(--green); }
-.sp-warn { background: rgba(252, 187, 0, 0.1); color: var(--amber); }
 
 .sp-btn {
   display: inline-flex;
@@ -494,12 +611,15 @@ html, body, #app {
 
 .sp-btn.danger,
 .sp-card .sp-btn.danger {
-  background: rgba(242, 138, 138, 0.1);
-  border-color: rgba(242, 138, 138, 0.5);
-  color: var(--red);
+  background: #9f0712;
+  border-color: #c1121f;
+  color: #fff;
 }
 .sp-btn.danger:hover:not(:disabled),
-.sp-card .sp-btn.danger:hover:not(:disabled) { background: rgba(242, 138, 138, 0.2); }
+.sp-card .sp-btn.danger:hover:not(:disabled) {
+  background: #b91c1c;
+  border-color: #dc2626;
+}
 
 .sp-badge {
   display: inline-flex;
@@ -538,6 +658,35 @@ html, body, #app {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sp-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  cursor: pointer;
+  min-width: 0;
+}
+.sp-setting-row + .sp-setting-row {
+  border-top: 1px solid var(--hair);
+}
+.sp-setting-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.sp-setting-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg2);
+}
+.sp-setting-desc {
+  font-size: 11px;
+  color: var(--fg3);
+  line-height: 1.35;
 }
 
 input[type="checkbox"] {
@@ -618,4 +767,90 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .sp-start-btn.starting {
   opacity: 0.75;
   cursor: wait;
+}
+
+.sp-filter-wrap {
+  position: relative;
+}
+
+.sp-card .sp-btn.sp-filter-active {
+  border-color: var(--accent);
+  color: var(--fg2);
+}
+
+.sp-filter-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 156px;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--slate);
+  border: 1px solid var(--edge);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sp-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--fg2);
+  cursor: pointer;
+  user-select: none;
+}
+.sp-filter-item:hover {
+  background: var(--slate3);
+}
+
+/* Skeleton loading states */
+.sp-skel {
+  position: relative;
+  overflow: hidden;
+  background: var(--slate3);
+  border-radius: 6px;
+}
+.sp-skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.06) 50%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: sp-shimmer 1.35s ease-in-out infinite;
+}
+@keyframes sp-shimmer {
+  100% { transform: translateX(100%); }
+}
+.sp-skel-cover {
+  width: 52px;
+  aspect-ratio: 5 / 7;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+.sp-skel-line {
+  height: 12px;
+  border-radius: 4px;
+}
+.sp-skel-line.lg {
+  height: 15px;
+  border-radius: 5px;
+}
+.sp-skel-line.sm {
+  height: 10px;
+}
+.sp-skel-pill {
+  height: 18px;
+  width: 58px;
+  border-radius: 999px;
 }
