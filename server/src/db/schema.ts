@@ -129,4 +129,14 @@ export const migrations: string[] = [
   ALTER TABLE links ADD COLUMN atsu_total INTEGER;
   ALTER TABLE links ADD COLUMN atsu_checked_at INTEGER;
   `,
+  `
+  -- Allow the user to override a content request's messy post title.
+  ALTER TABLE requests ADD COLUMN custom_title TEXT;
+  `,
+  `
+  -- Remove stale links/matches/settings for retired sources (senmanga, mgread).
+  DELETE FROM links WHERE source_id IN ('senmanga', 'mgread');
+  DELETE FROM source_matches WHERE source_id IN ('senmanga', 'mgread');
+  DELETE FROM source_settings WHERE source_id IN ('senmanga', 'mgread');
+  `,
 ];

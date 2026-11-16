@@ -1,9 +1,9 @@
 import { join, resolve } from 'node:path';
-import { buildApp, defaultWebDist } from './app.ts';
+import { buildApp } from './app.ts';
 import { config } from './settings.ts';
 
 const dataDir = resolve(import.meta.dirname, '../..', config.dataDir);
-const { app } = buildApp({ dbFile: join(dataDir, 'atsusync.db'), webDist: defaultWebDist });
+const { app } = buildApp({ dbFile: join(dataDir, 'atsusync.db') });
 
 app
   .listen({ port: config.port, host: '127.0.0.1' })

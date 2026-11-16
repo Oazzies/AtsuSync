@@ -1,5 +1,6 @@
 import type { SourceChapter, SourceChapterAlt, SourceKind, SourceMedium, SourceSeries, SourceSeriesHit } from '@atsusync/shared';
 import type { SourceHttp } from './http.ts';
+import type { TorrentClient } from './torrent.ts';
 
 export type { SourceChapter, SourceChapterAlt, SourceKind, SourceMedium, SourceSeries, SourceSeriesHit };
 
@@ -11,6 +12,23 @@ export interface PageRef {
   headers?: Record<string, string>;
   width?: number;
   height?: number;
+}
+
+/** What a download-type source (torrent / direct download) hands back for one chapter. */
+export type FetchedChapter =
+  | { type: 'pages'; files: { name: string; bytes: Uint8Array }[] }
+  /** A ready-made ebook (epub, pdf, docx, txt, md), saved as-is. `ext` has no dot. */
+  | { type: 'ebook'; ext: string; bytes: Uint8Array };
+
+/** Services the download pipeline gives a source that fetches whole files instead of page URLs. */
+export interface FetchContext {
+  http: SourceHttp;
+  torrents: TorrentClient;
+  /** Report progress 0..100 for the job's progress bar. */
+  progress(percent: number): void;
+  log(msg: string): void;
+  /** Throws when the user cancelled the job. */
+  checkCancel(): void;
 }
 
 export interface SourceAdapter {
@@ -31,6 +49,11 @@ export interface SourceAdapter {
   getSeries(url: string, http: SourceHttp): Promise<SourceSeries>;
   /** Resolve pages right before downloading — some hosts sign URLs with short expiries. */
   getChapterPages(chapter: SourceChapter, http: SourceHttp): Promise<PageRef[]>;
+  /**
+   * Download-type sources (kind 'torrent' / 'download'): fetch the chapter's file(s) and return pages or an ebook.
+   * When present the pipeline uses this instead of getChapterPages / getChapterText.
+   */
+  fetchChapter?(chapter: SourceChapter, ctx: FetchContext): Promise<FetchedChapter>;
   /** Novel sources: the chapter's text as XHTML paragraphs (see novel.ts). Required when medium is 'novel'. */
   getChapterText?(chapter: SourceChapter, http: SourceHttp): Promise<NovelChapter>;
 }

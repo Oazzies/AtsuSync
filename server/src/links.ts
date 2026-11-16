@@ -271,13 +271,18 @@ export class LinksRepo {
     tx(this.db, () => ids.forEach((id) => stmt.run(state, id)));
   }
 
-  /** Pending chapters that already exist on Atsumaru (uploaded by someone else) are skipped. */
-  skipChaptersOnAtsu(linkId: number, atsuRanges: [number, number][]) {
-    const ids = this.chapters(linkId, atsuRanges)
-      .filter((c) => c.onAtsu && c.state === 'pending')
-      .map((c) => c.id);
-    if (ids.length) this.setChapterState(ids, 'skipped');
-    return ids.length;
+  /**
+   * Reconcile chapters against Atsumaru's published/waiting ranges:
+   * - pending chapters already on Atsu are marked skipped;
+   * - downloaded chapters already on Atsu are marked uploaded (returns their IDs so downloads can be cleared).
+   */
+  skipChaptersOnAtsu(linkId: number, atsuRanges: [number, number][]): number[] {
+    const chaps = this.chapters(linkId, atsuRanges);
+    const toSkip = chaps.filter((c) => c.onAtsu && c.state === 'pending').map((c) => c.id);
+    const toUploaded = chaps.filter((c) => c.onAtsu && c.state === 'downloaded').map((c) => c.id);
+    if (toSkip.length) this.setChapterState(toSkip, 'skipped');
+    if (toUploaded.length) this.setChapterState(toUploaded, 'uploaded');
+    return toUploaded;
   }
 
   private mapLinks(rows: LinkRow[]): Link[] {

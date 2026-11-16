@@ -205,7 +205,7 @@ describe('download pipeline', () => {
     expect(t.links.chapters(link.id).map((c) => c.state)).toEqual(['known', 'uploaded']);
   });
 
-  it('deleting a single download job removes it and its ZIP while preserving uploaded state', async () => {
+  it('marking a chapter uploaded automatically clears its download job and ZIP; deleting a single job also works', async () => {
     const t = setup();
     close = () => t.app.close();
     const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
@@ -216,14 +216,18 @@ describe('download pipeline', () => {
     const job1 = jobs.find((j) => j.chapterId === c1!.id)!;
     const job2 = jobs.find((j) => j.chapterId === c2!.id)!;
     const file1 = t.pipeline.file(job1.id)!.path;
+    const file2 = t.pipeline.file(job2.id)!.path;
 
     await t.app.inject({ method: 'POST', url: '/api/chapters/state', payload: { chapterIds: [c1!.id], state: 'uploaded' } });
-    const del = await t.app.inject({ method: 'DELETE', url: `/api/downloads/${job1.id}` });
-    expect(del.statusCode).toBe(200);
-    expect(JSON.parse(del.payload)).toEqual({ jobs: 1, files: 1 });
     expect(existsSync(file1)).toBe(false);
     expect(t.pipeline.list({ linkId: link.id }).map((j) => j.id)).toEqual([job2.id]);
     expect(t.links.chapters(link.id).map((c) => c.state)).toEqual(['uploaded', 'downloaded']);
+
+    const del = await t.app.inject({ method: 'DELETE', url: `/api/downloads/${job2.id}` });
+    expect(del.statusCode).toBe(200);
+    expect(JSON.parse(del.payload)).toEqual({ jobs: 1, files: 1 });
+    expect(existsSync(file2)).toBe(false);
+    expect(t.pipeline.list({ linkId: link.id })).toEqual([]);
   });
 
   it('builds a chapter from uploaded images: preview, strip joining, ZIP, and clean-up', async () => {
@@ -411,5 +415,82 @@ describe('tracked links', () => {
     // Bulk untrack removes the link.
     await t.app.inject({ method: 'POST', url: '/api/links/bulk', payload: { ids: [link.id], action: 'untrack' } });
     expect(t.links.get(link.id)).toBeNull();
+  });
+
+  it('supports overwriting a request title and resolving /upload?source= from Atsumaru workspace', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    t.settings.update({ atsuCookie: 'session=abc' });
+
+    const patched = await t.app.inject({
+      method: 'PATCH',
+      url: '/api/requests/REQ1',
+      payload: { title: 'Better Series Title' },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json().title).toBe('Better Series Title');
+    expect(patched.json().customTitle).toBe('Better Series Title');
+
+    const reset = await t.app.inject({
+      method: 'PATCH',
+      url: '/api/requests/REQ1',
+      payload: { title: null },
+    });
+    expect(reset.statusCode).toBe(200);
+    expect(reset.json().title).toBe('Heart Aching');
+    expect(reset.json().customTitle).toBeNull();
+
+    // Mock /api/uploads and /collections/manga/documents/search for ?source= resolution
+    (t.atsu as any).fetchImpl = async (input: string) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/uploads') {
+        return new Response(
+          JSON.stringify({
+            sources: [{ id: '9ffc1767-3889-4809-b197-8e1e8183d2c5', mangaId: 'M99', title: 'Resolved Series' }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.pathname === '/collections/manga/documents/search') {
+        return new Response(
+          JSON.stringify({
+            hits: [{ document: { id: 'M99', title: 'Resolved Series', otherNames: [], chapterCount: 5, medium: 'manga' } }],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response('{}', { status: 200 });
+    };
+
+    const resolved = await t.app.inject({
+      method: 'POST',
+      url: '/api/uploads/resolve',
+      payload: { sourceId: '9ffc1767-3889-4809-b197-8e1e8183d2c5' },
+    });
+    expect(resolved.statusCode).toBe(200);
+    const body = resolved.json();
+    expect(body.request.id).toBe('atsu:M99');
+    expect(body.request.title).toBe('Resolved Series');
+    expect(body.resolved.mangaId).toBe('M99');
+
+    // GET /api/requests/atsu:<mangaId> also resolves a series tracked via a content request link
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', atsuMangaId: 'M1', checkIntervalMin: 60 });
+    const byManga = await t.app.inject({ method: 'GET', url: '/api/requests/atsu:M1' });
+    expect(byManga.statusCode).toBe(200);
+    expect(byManga.json().request.id).toBe('REQ1');
+    expect(byManga.json().links.map((l: { id: number }) => l.id)).toEqual([link.id]);
+  });
+
+  it('normalizes comma decimal chapter labels like 0,5 to 0.5 in download filenames', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
+    const [c1] = t.links.chapters(link.id);
+    t.db.prepare('UPDATE source_chapters SET label = ? WHERE id = ?').run('Chapter 0,5', c1!.id);
+
+    const [job] = t.pipeline.enqueue([c1!.id]);
+    await waitForJobs(t.pipeline);
+    const file = t.pipeline.file(job!.id);
+    expect(file?.name).toContain('Chapter 0.5.zip');
   });
 });

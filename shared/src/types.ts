@@ -28,6 +28,7 @@ export interface TrackerLink {
 export interface ContentRequest {
   id: string;
   title: string;
+  customTitle?: string | null;
   content: string;
   url: string;
   authorName: string | null;
@@ -89,8 +90,12 @@ export interface RequestComment {
   claim: boolean;
 }
 
-/** Scanlation = the group's own site; aggregator = re-hosts other groups' or official releases; official = the publisher's own platform. */
-export type SourceKind = 'scanlation' | 'aggregator' | 'official';
+/**
+ * Scanlation = the group's own site; aggregator = re-hosts other groups' or official releases; official = the
+ * publisher's own platform; torrent = releases fetched through a BitTorrent swarm (Nyaa); download = direct-download file hosts;
+ * suwayomi = Keiyoushi/Mihon APK extensions bridged through a running Suwayomi-Server instance.
+ */
+export type SourceKind = 'scanlation' | 'aggregator' | 'official' | 'torrent' | 'download' | 'suwayomi';
 
 /** Comics are downloaded as page-image ZIPs, novels as one EPUB per chapter. */
 export type SourceMedium = 'comic' | 'novel';
@@ -253,11 +258,31 @@ export interface DownloadJob {
 export interface Settings {
   atsuCookie: string;
   defaultCheckIntervalMin: number;
+  suwayomiUrl: string;
 }
 
 export interface SettingsView extends Omit<Settings, 'atsuCookie'> {
   atsuCookieSet: boolean;
   atsuUser: string | null;
+}
+
+export interface SuwayomiStatus {
+  running: boolean;
+  managed: boolean;
+  url: string;
+  jarPresent: boolean;
+  pid: number | null;
+  lastError: string | null;
+}
+
+export interface SuwayomiExtensionInfo {
+  pkgName: string;
+  name: string;
+  lang: string;
+  versionName: string;
+  isInstalled: boolean;
+  hasUpdate: boolean;
+  isNsfw: boolean;
 }
 
 export type ServerEvent =
@@ -266,4 +291,7 @@ export type ServerEvent =
   | { type: 'new_chapters'; linkId: number; seriesTitle: string; labels: string[] }
   /** Chapters that were paid / early access and are now free to download. */
   | { type: 'chapters_unlocked'; linkId: number; seriesTitle: string; labels: string[] }
-  | { type: 'requests_synced'; added: number };
+  | { type: 'requests_synced'; added: number }
+  | { type: 'discovery_start'; requestId: string; sources: { id: string; name: string }[] }
+  | { type: 'discovery_progress'; requestId: string; sourceId: string; sourceName: string; matches: SourceMatch[]; error: string | null }
+  | { type: 'discovery_done'; requestId: string };

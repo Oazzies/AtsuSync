@@ -1,13 +1,14 @@
-import type { ContentRequest, SourceMatch } from '@atsusync/shared';
+import type { ContentRequest, MangaBaka, SourceMatch } from '@atsusync/shared';
 import type { Db } from '../db/client.ts';
 import { tx } from '../db/client.ts';
-import { getMangaBakaSeries } from '../atsu/mangabaka.ts';
+import { events } from '../events.ts';
+import { getMangaBakaSeries, searchMangaBakaSeries } from '../atsu/mangabaka.ts';
 import { wantsNovel } from '../atsu/presence.ts';
 import { bestScore, searchQueries } from './match.ts';
 import type { SourceRegistry } from './registry.ts';
 import { mediumOf, type SourceAdapter, type SourceSeriesHit } from './types.ts';
 
-const MIN_SCORE = 0.45;
+const MIN_SCORE = 0.62;
 const MAX_HITS_PER_SOURCE = 3;
 
 interface MatchRow {
@@ -45,27 +46,62 @@ export class Discovery {
     return rows.filter((r) => !stale.includes(r)).map((r) => this.rowToMatch(r));
   }
 
-  async titlesFor(req: ContentRequest): Promise<string[]> {
-    const titles = [req.title, ...req.altTitles];
+  async resolveMangaBaka(req: ContentRequest): Promise<MangaBaka | null> {
     if (req.mangabakaId) {
-      const mb = await getMangaBakaSeries(req.mangabakaId).catch(() => null);
-      if (mb) titles.push(mb.title, ...mb.titles);
+      return getMangaBakaSeries(req.mangabakaId).catch(() => null);
     }
+    const medium = wantsNovel(req) ? 'novel' : 'comic';
+    return searchMangaBakaSeries([req.title, ...req.altTitles].filter(Boolean), medium).catch(() => null);
+  }
+
+  async titlesFor(req: ContentRequest, mb?: MangaBaka | null): Promise<string[]> {
+    const resolved = mb === undefined ? await this.resolveMangaBaka(req) : mb;
+    const titles = [
+      ...(resolved ? [resolved.title, ...resolved.titles] : []),
+      req.title,
+      ...req.altTitles,
+    ];
     return titles.filter(Boolean);
   }
 
   async find(req: ContentRequest): Promise<SourceMatch[]> {
-    const titles = await this.titlesFor(req);
+    const mb = await this.resolveMangaBaka(req);
+    const titles = await this.titlesFor(req, mb);
     const queries = searchQueries(titles);
     // A Novel request only searches novel sources; comic requests never search them.
     const medium = wantsNovel(req) ? 'novel' : 'comic';
-    const results = await Promise.all(this.sources.enabled().filter((a) => a.search && mediumOf(a) === medium).map((a) => this.searchOne(a, titles, queries)));
-    const rows = results.flat().map((m) => ({ ...m, request_id: req.id }));
-    tx(this.db, () => {
-      this.db.prepare('DELETE FROM source_matches WHERE request_id = ?').run(req.id);
-      for (const r of rows) this.insert(r);
+    const adapters = this.sources.enabled().filter((a) => a.search && mediumOf(a) === medium);
+    events.emitEvent({
+      type: 'discovery_start',
+      requestId: req.id,
+      sources: adapters.map((a) => ({ id: a.id, name: a.name })),
     });
-    return this.cached(req.id);
+    try {
+      const results = await Promise.all(
+        adapters.map(async (a) => {
+          const found = await this.searchOne(a, titles, queries, mb);
+          const searchError = found.length === 1 && found[0]!.series_url.endsWith('#search-error') ? found[0]!.error : null;
+          const valid = searchError ? [] : found;
+          events.emitEvent({
+            type: 'discovery_progress',
+            requestId: req.id,
+            sourceId: a.id,
+            sourceName: a.name,
+            matches: valid.map((r) => this.rowToMatch({ ...r, request_id: req.id })),
+            error: searchError,
+          });
+          return valid;
+        }),
+      );
+      const rows = results.flat().map((m) => ({ ...m, request_id: req.id }));
+      tx(this.db, () => {
+        this.db.prepare('DELETE FROM source_matches WHERE request_id = ?').run(req.id);
+        for (const r of rows) this.insert(r);
+      });
+      return this.cached(req.id);
+    } finally {
+      events.emitEvent({ type: 'discovery_done', requestId: req.id });
+    }
   }
 
   /** Manually attach a series by pasting its URL on a supported site. */
@@ -91,7 +127,12 @@ export class Discovery {
     return this.rowToMatch(row);
   }
 
-  private async searchOne(adapter: SourceAdapter, titles: string[], queries: string[]): Promise<Omit<MatchRow, 'request_id'>[]> {
+  private async searchOne(
+    adapter: SourceAdapter,
+    titles: string[],
+    queries: string[],
+    mb: MangaBaka | null = null,
+  ): Promise<Omit<MatchRow, 'request_id'>[]> {
     try {
       const hits = new Map<string, SourceSeriesHit>();
       for (const q of queries) {
@@ -110,11 +151,16 @@ export class Discovery {
             const s = await adapter.getSeries(h.url, this.sources.http);
             // The site knows the series but has nothing to upload (e.g. MangaDex without English chapters).
             if (s.chapters.length === 0) return null;
+            let finalScore = Math.max(score, bestScore(titles, [s.title, ...s.altTitles]));
+            if (mb?.totalChapters && s.chapters.length > mb.totalChapters * 2.5 + 10) {
+              finalScore = Math.round(finalScore * 0.75 * 100) / 100;
+            }
+            if (finalScore < MIN_SCORE) return null;
             return {
               ...base,
               title: s.title,
               cover: s.cover ?? base.cover,
-              score: Math.max(score, bestScore(titles, [s.title, ...s.altTitles])),
+              score: finalScore,
               chapter_count: s.chapters.length,
               latest_chapter: s.chapters.at(-1)?.number ?? null,
               error: null,

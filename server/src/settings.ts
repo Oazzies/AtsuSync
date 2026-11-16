@@ -9,6 +9,7 @@ export const config = {
 const defaults = (): Settings => ({
   atsuCookie: '',
   defaultCheckIntervalMin: 60,
+  suwayomiUrl: '',
 });
 
 export class SettingsStore {

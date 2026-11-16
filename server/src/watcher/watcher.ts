@@ -17,6 +17,7 @@ export class Watcher {
     private sources: SourceRegistry,
     private atsu: AtsuClient | null,
     private tickMs = 60_000,
+    private onChaptersUploaded?: (chapterIds: number[]) => void,
   ) {}
 
   start() {
@@ -41,8 +42,13 @@ export class Watcher {
   }
 
   async check(link: Link) {
+    const adapter = this.sources.find(link.sourceId);
+    if (!adapter) {
+      this.links.update(link.id, { watch: false });
+      this.links.markChecked(link.id, null);
+      return [];
+    }
     try {
-      const adapter = this.sources.get(link.sourceId);
       this.sources.http.invalidate(link.seriesUrl);
       const series = await adapter.getSeries(link.seriesUrl, this.sources.http);
       const { added, unlocked } = this.links.applySeries(link.id, series, 'pending');
@@ -51,7 +57,10 @@ export class Watcher {
         const state = await this.atsu.getSeriesState({ mangaId: link.atsuMangaId }).catch(() => null);
         if (state) {
           this.links.setAtsuState(link.id, state);
-          if (state.found) this.links.skipChaptersOnAtsu(link.id, [...state.ranges, ...state.waiting]);
+          if (state.found) {
+            const uploadedIds = this.links.skipChaptersOnAtsu(link.id, [...state.ranges, ...state.waiting]);
+            if (uploadedIds.length) this.onChaptersUploaded?.(uploadedIds);
+          }
         }
       }
 

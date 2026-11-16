@@ -1,7 +1,6 @@
 import { dirname, join } from 'node:path';
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import Fastify from 'fastify';
-import fastifyStatic from '@fastify/static';
 import type { ContentRequest, RequestComment, Settings, SettingsView } from '@atsusync/shared';
 import { AtsuClient, emptySeriesState } from './atsu/client.ts';
 import { RequestsRepo, syncRequests } from './atsu/requests.ts';
@@ -15,8 +14,11 @@ import { Discovery } from './sources/discovery.ts';
 import { mediumOf } from './sources/types.ts';
 import { SourceRegistry } from './sources/registry.ts';
 import { SourceHttp } from './sources/http.ts';
+import { SUWAYOMI_PREFIX, SuwayomiClient, createSuwayomiAdapter, isAtsumaruExtension, isAtsumaruSource, isEnglishLang } from './sources/suwayomi.ts';
+import { SuwayomiManager } from './sources/suwayomiManager.ts';
 import type { SourceAdapter } from './sources/types.ts';
 import { Drafts, mimeFor } from './upload/drafts.ts';
+import type { TorrentClient } from './sources/torrent.ts';
 import { DownloadPipeline } from './upload/pipeline.ts';
 import { Watcher } from './watcher/watcher.ts';
 
@@ -24,7 +26,8 @@ export interface AppOptions {
   dbFile: string;
   /** Where chapter ZIPs are written; defaults to `downloads/` next to the database. */
   downloadsDir?: string;
-  webDist?: string;
+  /** Torrent engine for torrent sources; defaults to the built-in WebTorrent client. Tests inject a fake. */
+  torrents?: TorrentClient;
   adapters?: SourceAdapter[];
   fetchImpl?: typeof fetch;
   background?: boolean;
@@ -36,12 +39,33 @@ export function buildApp(opts: AppOptions) {
   const atsu = new AtsuClient(() => settings.get().atsuCookie, opts.fetchImpl);
   const requests = new RequestsRepo(db);
   const sources = new SourceRegistry(db, opts.adapters, new SourceHttp(opts.fetchImpl));
+  const suwayomi = new SuwayomiClient(() => settings.get().suwayomiUrl, opts.fetchImpl);
+  const suwayomiManager = new SuwayomiManager(dirname(opts.dbFile), settings, suwayomi, opts.fetchImpl);
+  const syncSuwayomi = async () => {
+    const base = suwayomi.baseUrl();
+    if (!base) {
+      sources.replaceDynamic(SUWAYOMI_PREFIX, []);
+      return 0;
+    }
+    try {
+      const host = new URL(base).hostname;
+      if (host) sources.http.configureHost(host, { rpm: 600, concurrency: 4 });
+    } catch {
+      throw Object.assign(new Error('Invalid Suwayomi-Server URL'), { statusCode: 400 });
+    }
+    const nodes = (await suwayomi.listSources())
+      .filter((n) => isEnglishLang(n.lang) && !isAtsumaruSource(n))
+      .sort((a, b) => Number(a.isNsfw) - Number(b.isNsfw) || (a.displayName || a.name).localeCompare(b.displayName || b.name));
+    const adapters = nodes.map((n) => createSuwayomiAdapter(n, suwayomi));
+    sources.replaceDynamic(SUWAYOMI_PREFIX, adapters);
+    return adapters.length;
+  };
   const discovery = new Discovery(db, sources);
   const links = new LinksRepo(db, sources);
   const downloadsDir = opts.downloadsDir ?? join(dirname(opts.dbFile), 'downloads');
-  const pipeline = new DownloadPipeline(db, links, sources, downloadsDir);
+  const pipeline = new DownloadPipeline(db, links, sources, downloadsDir, 2, opts.torrents);
   const drafts = new Drafts(join(downloadsDir, '.drafts'));
-  const watcher = new Watcher(links, sources, atsu);
+  const watcher = new Watcher(links, sources, atsu, 60_000, (ids) => pipeline.clearForChapters(ids));
   const presence = new PresenceChecker(atsu, requests);
 
   const app = Fastify({ logger: { level: 'info', transport: undefined } });
@@ -69,6 +93,9 @@ export function buildApp(opts: AppOptions) {
   app.get('/api/settings', settingsView);
   app.put<{ Body: Partial<Settings> }>('/api/settings', async (req) => {
     settings.update(req.body ?? {});
+    if (!settings.get().suwayomiUrl.trim()) {
+      sources.replaceDynamic(SUWAYOMI_PREFIX, []);
+    }
     return settingsView();
   });
 
@@ -97,11 +124,63 @@ export function buildApp(opts: AppOptions) {
   });
   app.get<{ Params: { id: string } }>('/api/requests/:id', async (req) => {
     // Refresh this one post so status tags are current when looking at it.
-    const post = req.params.id.startsWith('atsu:') ? null : await atsu.getPost(req.params.id).catch(() => null);
+    const post = req.params.id.startsWith('atsu:') || req.params.id.startsWith('mb:') ? null : await atsu.getPost(req.params.id).catch(() => null);
     if (post?.id && post.createdAt) requests.upsertPost(post);
-    const r = mustRequest(req.params.id);
+    const r = (req.params.id.startsWith('atsu:') ? requests.findByMangaId(req.params.id.slice(5)) : null) ?? mustRequest(req.params.id);
     const mangabaka = r.mangabakaId ? await getMangaBakaSeries(r.mangabakaId).catch(() => null) : null;
     return { request: r, mangabaka, matches: discovery.cached(r.id), links: links.list({ requestId: r.id }) };
+  });
+  app.patch<{ Params: { id: string }; Body: { title?: string | null } }>('/api/requests/:id', async (req) => {
+    const r = mustRequest(req.params.id);
+    if (req.body && 'title' in req.body) {
+      requests.setCustomTitle(r.id, req.body.title ?? null);
+    }
+    return mustRequest(r.id);
+  });
+  app.post<{ Body: { sourceId?: string | null; mangaId?: string | null; title?: string | null } }>('/api/uploads/resolve', async (req) => {
+    const sourceId = req.body?.sourceId?.trim() || null;
+    let mangaId = req.body?.mangaId?.trim() || null;
+    let mangaBakaId: string | null = null;
+    let title = req.body?.title?.trim() || null;
+
+    if (sourceId && !mangaId) {
+      const fromWorkspace = await atsu.resolveUploadSource(sourceId).catch(() => null);
+      if (fromWorkspace) {
+        mangaId = fromWorkspace.mangaId;
+        mangaBakaId = fromWorkspace.mangaBakaId;
+        title = title ?? fromWorkspace.title;
+      }
+    }
+
+    let r = mangaId ? requests.findByMangaId(mangaId) : null;
+    if (!r && mangaBakaId) r = requests.findByMangaBakaId(mangaBakaId);
+
+    if (!r && mangaId) {
+      const info = await atsu.getSeriesInfo(mangaId).catch(() => null);
+      if (info) {
+        r = requests.upsertAtsuSeries(info);
+        if (mangaBakaId && !r.mangabakaId) {
+          requests.setMangaBakaId(r.id, mangaBakaId);
+          r = requests.get(r.id)!;
+        }
+      }
+    }
+    if (!r && mangaBakaId) {
+      const mb = await getMangaBakaSeries(mangaBakaId).catch(() => null);
+      r = requests.upsertMangaBakaSeries(mangaBakaId, mb?.title ?? title ?? `MangaBaka #${mangaBakaId}`);
+    }
+
+    if (!r) {
+      return { request: null, mangabaka: null, matches: [], links: [], resolved: { mangaId, mangaBakaId, title } };
+    }
+    const mangabaka = r.mangabakaId ? await getMangaBakaSeries(r.mangabakaId).catch(() => null) : null;
+    return {
+      request: r,
+      mangabaka,
+      matches: discovery.cached(r.id),
+      links: links.list({ requestId: r.id }),
+      resolved: { mangaId: mangaId ?? r.atsuMangaId, mangaBakaId: mangaBakaId ?? r.mangabakaId, title: r.title },
+    };
   });
   app.get<{ Params: { id: string } }>('/api/requests/:id/comments', async (req): Promise<RequestComment[]> => {
     const r = mustRequest(req.params.id);
@@ -136,6 +215,38 @@ export function buildApp(opts: AppOptions) {
 
   // ---- Sources ----
   app.get('/api/sources', async () => sources.info());
+  app.post('/api/sources/suwayomi/sync', async () => {
+    if (suwayomi.baseUrl()) {
+      await suwayomiManager.syncEnglishExtensions();
+    }
+    const count = await syncSuwayomi();
+    return { count, sources: sources.info() };
+  });
+  app.get('/api/sources/suwayomi/status', async () => suwayomiManager.status());
+  app.post('/api/sources/suwayomi/setup', async () => {
+    const status = await suwayomiManager.setupAndStart();
+    const count = await syncSuwayomi();
+    return { status, count, sources: sources.info() };
+  });
+  app.post('/api/sources/suwayomi/stop', async () => {
+    await suwayomiManager.stop();
+    return suwayomiManager.status();
+  });
+  app.get('/api/sources/suwayomi/extensions', async () => ({
+    extensions: (await suwayomi.fetchExtensions())
+      .filter((e) => isEnglishLang(e.lang) && !isAtsumaruExtension(e))
+      .sort((a, b) => Number(a.isNsfw) - Number(b.isNsfw) || a.name.localeCompare(b.name)),
+  }));
+  app.post<{ Params: { pkgName: string } }>('/api/sources/suwayomi/extensions/:pkgName/install', async (req) => {
+    await suwayomi.setExtensionInstalled(req.params.pkgName, true);
+    const count = await syncSuwayomi();
+    return { count, sources: sources.info() };
+  });
+  app.post<{ Params: { pkgName: string } }>('/api/sources/suwayomi/extensions/:pkgName/uninstall', async (req) => {
+    await suwayomi.setExtensionInstalled(req.params.pkgName, false);
+    const count = await syncSuwayomi();
+    return { count, sources: sources.info() };
+  });
   app.put<{ Params: { id: string }; Body: { enabled: boolean } }>('/api/sources/:id', async (req) => {
     sources.setEnabled(req.params.id, !!req.body.enabled);
     return sources.info();
@@ -164,7 +275,13 @@ export function buildApp(opts: AppOptions) {
       atsuMangaId: knownMangaId ?? atsuState?.mangaId ?? null,
       checkIntervalMin: settings.get().defaultCheckIntervalMin,
     });
-    if (atsuState) links.setAtsuState(link.id, atsuState);
+    if (atsuState) {
+      links.setAtsuState(link.id, atsuState);
+      if (atsuState.found) {
+        const uploadedIds = links.skipChaptersOnAtsu(link.id, [...atsuState.ranges, ...atsuState.waiting]);
+        if (uploadedIds.length) pipeline.clearForChapters(uploadedIds);
+      }
+    }
     return links.get(link.id)!;
   });
   app.get<{ Params: { id: string } }>('/api/links/:id', async (req) => {
@@ -173,7 +290,13 @@ export function buildApp(opts: AppOptions) {
     const r = requests.get(link.requestId);
     const ref = link.atsuMangaId ? { mangaId: link.atsuMangaId } : r?.mangabakaId ? { mangaBakaId: r.mangabakaId } : null;
     const atsuState = ref ? await atsu.getSeriesState(ref).catch((e) => ({ ...emptySeriesState(), error: String(e.message) })) : null;
-    if (atsuState) links.setAtsuState(link.id, atsuState);
+    if (atsuState) {
+      links.setAtsuState(link.id, atsuState);
+      if (atsuState.found) {
+        const uploadedIds = links.skipChaptersOnAtsu(link.id, [...atsuState.ranges, ...atsuState.waiting]);
+        if (uploadedIds.length) pipeline.clearForChapters(uploadedIds);
+      }
+    }
     const mangabaka = r?.mangabakaId ? await getMangaBakaSeries(r.mangabakaId).catch(() => null) : null;
     return { link: links.get(link.id), atsu: atsuState, mangabaka, chapters: links.chapters(link.id, atsuState ? [...atsuState.ranges, ...atsuState.waiting] : []) };
   });
@@ -205,7 +328,10 @@ export function buildApp(opts: AppOptions) {
       const state = await atsu.getSeriesState(ref).catch(() => null);
       if (state) {
         links.setAtsuState(link.id, state);
-        if (state.found) links.skipChaptersOnAtsu(link.id, [...state.ranges, ...state.waiting]);
+        if (state.found) {
+          const uploadedIds = links.skipChaptersOnAtsu(link.id, [...state.ranges, ...state.waiting]);
+          if (uploadedIds.length) pipeline.clearForChapters(uploadedIds);
+        }
         updated++;
       }
     }
@@ -289,6 +415,9 @@ export function buildApp(opts: AppOptions) {
   });
   app.post<{ Body: { chapterIds: number[]; state: 'skipped' | 'known' | 'pending' | 'uploaded' } }>('/api/chapters/state', async (req) => {
     links.setChapterState(req.body.chapterIds, req.body.state);
+    if (req.body.state === 'uploaded') {
+      pipeline.clearForChapters(req.body.chapterIds);
+    }
     return { ok: true };
   });
   app.post<{ Params: { id: string }; Body: { url: string } }>('/api/chapters/:id/source', async (req) =>
@@ -316,8 +445,9 @@ export function buildApp(opts: AppOptions) {
   app.get<{ Params: { id: string } }>('/api/downloads/:id/file', async (req, reply) => {
     const file = pipeline.file(Number(req.params.id));
     if (!file) throw Object.assign(new Error('That download is not ready (or the file was deleted). Download it again.'), { statusCode: 404 });
+    const contentType = file.path.toLowerCase().endsWith('.epub') ? 'application/epub+zip' : 'application/zip';
     return reply
-      .header('content-type', 'application/zip')
+      .header('content-type', contentType)
       .header('content-disposition', `attachment; filename="${file.name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(file.name)}`)
       .send(createReadStream(file.path));
   });
@@ -373,21 +503,18 @@ export function buildApp(opts: AppOptions) {
     });
   });
 
-  // ---- Built Vue app ----
-  if (opts.webDist && existsSync(opts.webDist)) {
-    app.register(fastifyStatic, { root: opts.webDist });
-    app.setNotFoundHandler((req, reply) => {
-      if (req.url.startsWith('/api/')) return reply.status(404).send({ error: 'Not found' });
-      return reply.sendFile('index.html');
-    });
-  }
-
   let syncTimer: NodeJS.Timeout | null = null;
   app.addHook('onReady', async () => {
     if (opts.background === false) return;
     watcher.start();
     presence.start();
     pipeline.pump();
+    if (settings.get().suwayomiUrl.trim()) {
+      void suwayomiManager
+        .startIfInstalled()
+        .then(() => syncSuwayomi())
+        .catch((e) => app.log.warn(`Suwayomi sync failed: ${(e as Error).message}`));
+    }
     void runSync(true).catch((e) => app.log.warn(`Request sync failed: ${e.message}`));
     // A quick sync only sees new posts; status tags (Added, Duplicate…) change on old ones, which
     // is what removes a post's upload button, so walk the whole forum (~15 pages) every few hours.
@@ -397,11 +524,11 @@ export function buildApp(opts: AppOptions) {
   app.addHook('onClose', async () => {
     watcher.stop();
     presence.stop();
+    await pipeline.close();
+    await suwayomiManager.stop();
     if (syncTimer) clearInterval(syncTimer);
     db.close();
   });
 
   return { app, db, settings, atsu, requests, sources, discovery, links, pipeline, watcher, presence };
 }
-
-export const defaultWebDist = join(import.meta.dirname, '../../web/dist');

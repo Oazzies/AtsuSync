@@ -7,6 +7,7 @@ import { events } from '../events.ts';
 import type { LinksRepo } from '../links.ts';
 import { BlockedError } from '../polite.ts';
 import type { SourceRegistry } from '../sources/registry.ts';
+import { WebTorrentClient, type TorrentClient } from '../sources/torrent.ts';
 import type { SourceAdapter } from '../sources/types.ts';
 import { mediumOf } from '../sources/types.ts';
 import { createEpub, imageMediaType, type EpubImage } from './epub.ts';
@@ -68,7 +69,10 @@ export class DownloadPipeline {
     private sources: SourceRegistry,
     private dir: string,
     private concurrency = 2,
+    private torrents: TorrentClient = new WebTorrentClient(join(dir, '.torrents')),
   ) {
+    // Torrent data is scratch space; anything left from a crashed run is stale.
+    rmSync(join(dir, '.torrents'), { recursive: true, force: true });
     // Jobs interrupted by a restart go back to the queue.
     this.db.prepare(`UPDATE upload_jobs SET state = 'queued', progress = 0 WHERE state NOT IN ('queued','done','failed','cancelled')`).run();
   }
@@ -98,7 +102,8 @@ export class DownloadPipeline {
     } catch {
       return null;
     }
-    return { path: row.file_path, name: `${safeName(job.seriesTitle)} - ${safeName(job.chapterLabel)}${extname(row.file_path) || '.zip'}` };
+    const label = job.chapterLabel.replace(/(\d),(\d)/g, '$1.$2');
+    return { path: row.file_path, name: `${safeName(job.seriesTitle)} - ${safeName(label)}${extname(row.file_path) || '.zip'}` };
   }
 
   /** `urls` overrides a chapter's page URL for this download only (see addFromSource). */
@@ -221,6 +226,18 @@ export class DownloadPipeline {
     return this.removeJobs(this.finishedRows('id = ?', id));
   }
 
+  /** Remove finished download jobs and ZIP files for the given chapter IDs (e.g. once uploaded). */
+  clearForChapters(chapterIds: number[]): { jobs: number; files: number } {
+    if (!chapterIds.length) return { jobs: 0, files: 0 };
+    const placeholders = chapterIds.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(
+        `SELECT id, chapter_id, state, file_path, prev_chapter_state FROM upload_jobs WHERE chapter_id IN (${placeholders}) AND state IN ('done','failed','cancelled')`,
+      )
+      .all(...chapterIds) as unknown as FinishedRow[];
+    return this.removeJobs(rows);
+  }
+
   private finishedRows(where: string, arg: number): FinishedRow[] {
     return this.db
       .prepare(`SELECT id, chapter_id, state, file_path, prev_chapter_state FROM upload_jobs WHERE ${where} AND state IN ('done','failed','cancelled')`)
@@ -305,11 +322,11 @@ export class DownloadPipeline {
     return { path, size: statSync(path).size };
   }
 
-  /** Write a novel chapter's EPUB to `<dir>/<series>/<chapter>.epub`. */
-  private saveEpub(seriesTitle: string, chapterLabel: string, data: Buffer): { path: string; size: number } {
+  /** Write a novel chapter's ebook to `<dir>/<series>/<chapter>.<ext>`. */
+  private saveEpub(seriesTitle: string, chapterLabel: string, data: Uint8Array, ext = 'epub'): { path: string; size: number } {
     const seriesDir = join(this.dir, safeName(seriesTitle));
     mkdirSync(seriesDir, { recursive: true });
-    const path = join(seriesDir, `${safeName(chapterLabel)}.epub`);
+    const path = join(seriesDir, `${safeName(chapterLabel)}.${ext}`);
     writeFileSync(path, data);
     return { path, size: statSync(path).size };
   }
@@ -348,6 +365,63 @@ export class DownloadPipeline {
     this.finish(id, 'done', null);
   }
 
+  /**
+   * Download-type sources (torrents, file hosts): the adapter fetches whole files, which come back as page
+   * images (repacked into the usual ZIP) or a ready-made ebook (saved as-is).
+   */
+  private async runFetched(id: number, adapter: SourceAdapter, chapter: SourceChapter, seriesTitle: string, checkCancel: () => void) {
+    this.setState(id, 'downloading', `Fetching ${chapter.label} from ${adapter.name}`);
+    this.update(id, { total: 100, progress: 0 });
+    // Remember which torrents this job touched so their files are deleted once the chapter is packed.
+    const used = new Set<string>();
+    const torrents: TorrentClient = {
+      download: (req, pick, hooks) => {
+        used.add(req.infoHash);
+        return this.torrents.download(req, pick, hooks);
+      },
+      release: () => {},
+      destroy: async () => {},
+    };
+    let lastPct = -1;
+    try {
+      const out = await adapter.fetchChapter!(chapter, {
+        http: this.sources.http,
+        torrents,
+        progress: (pct) => {
+          if (pct === lastPct) return;
+          lastPct = pct;
+          this.update(id, { progress: pct });
+        },
+        log: (m) => this.log(id, m),
+        checkCancel,
+      });
+      checkCancel();
+      if (out.type === 'ebook') {
+        if (out.bytes.length < 64) throw new Error(`${adapter.name} delivered an empty ${out.ext} file`);
+        const { path, size } = this.saveEpub(seriesTitle, chapter.label, out.bytes, out.ext);
+        this.db.prepare('UPDATE upload_jobs SET file_path = ?, file_size = ? WHERE id = ?').run(path, size, id);
+        this.log(id, `Saved ${out.ext.toUpperCase()} (${(size / 1024 / 1024).toFixed(1)} MB) to ${path}`);
+        this.finish(id, 'done', null);
+        return;
+      }
+      const valid = out.files.filter((f) => f.bytes.length >= 64 && looksLikeImage(f.bytes));
+      if (valid.length < out.files.length) this.log(id, `Warning: ${out.files.length - valid.length} file(s) were not valid images — skipped`);
+      if (valid.length === 0) throw new Error(`No valid images in what ${adapter.name} delivered`);
+      const fixed = await mergeSliverPages(valid);
+      if (fixed.merged > 0) this.log(id, `Joined ${fixed.merged} thin leftover strip(s) onto the pages above them (${valid.length} → ${fixed.files.length} pages)`);
+      const { path, size } = this.bundle(seriesTitle, chapter.label, fixed.files);
+      this.db.prepare('UPDATE upload_jobs SET file_path = ?, file_size = ? WHERE id = ?').run(path, size, id);
+      this.log(id, `Saved ${fixed.files.length} pages (${(size / 1024 / 1024).toFixed(1)} MB) to ${path}`);
+      this.finish(id, 'done', null);
+    } finally {
+      for (const h of used) this.torrents.release(h);
+    }
+  }
+
+  async close() {
+    await this.torrents.destroy();
+  }
+
   private async run(id: number) {
     const job = this.get(id)!;
     const chapter = this.links.chapter(job.chapterId)!;
@@ -360,6 +434,10 @@ export class DownloadPipeline {
     };
 
     try {
+      if (adapter.fetchChapter) {
+        await this.runFetched(id, adapter, { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked }, link.seriesTitle, checkCancel);
+        return;
+      }
       if (mediumOf(adapter) === 'novel') {
         await this.runNovel(id, adapter, { number: chapter.number, label: chapter.label, url: pageUrl, locked: !!chapter.locked }, link.seriesTitle, checkCancel);
         return;
