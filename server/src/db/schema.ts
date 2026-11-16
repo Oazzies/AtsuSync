@@ -114,4 +114,19 @@ export const migrations: string[] = [
   ALTER TABLE requests ADD COLUMN alt_titles_json TEXT;
   ALTER TABLE requests ADD COLUMN cover TEXT;
   `,
+  `
+  -- Cache series cover directly on links for tracked list display.
+  ALTER TABLE links ADD COLUMN cover TEXT;
+  `,
+  `
+  -- Multi-source aggregators: track each chapter's scanlation group and alternative uploads.
+  ALTER TABLE source_chapters ADD COLUMN source_group TEXT;
+  ALTER TABLE source_chapters ADD COLUMN alternatives_json TEXT;
+  `,
+  `
+  -- Cache Atsumaru's published/waiting chapter ranges & total on links for Tracked filtering.
+  ALTER TABLE links ADD COLUMN atsu_ranges_json TEXT;
+  ALTER TABLE links ADD COLUMN atsu_total INTEGER;
+  ALTER TABLE links ADD COLUMN atsu_checked_at INTEGER;
+  `,
 ];

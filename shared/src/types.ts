@@ -214,6 +214,7 @@ export interface Link {
   sourceKind: SourceKind;
   seriesUrl: string;
   seriesTitle: string;
+  cover: string | null;
   atsuMangaId: string | null;
   watch: boolean;
   checkIntervalMin: number;
@@ -221,6 +222,9 @@ export interface Link {
   lastError: string | null;
   pendingCount: number;
   chapterCount: number;
+  atsuTotal: number | null;
+  atsuCheckedAt: number | null;
+  missingCount: number;
 }
 
 export type JobState = 'queued' | 'downloading' | 'done' | 'failed' | 'cancelled';
@@ -258,6 +262,7 @@ export interface SettingsView extends Omit<Settings, 'atsuCookie'> {
 
 export type ServerEvent =
   | { type: 'job'; job: DownloadJob }
+  | { type: 'downloads_complete'; linkId: number; seriesTitle: string; count: number }
   | { type: 'new_chapters'; linkId: number; seriesTitle: string; labels: string[] }
   /** Chapters that were paid / early access and are now free to download. */
   | { type: 'chapters_unlocked'; linkId: number; seriesTitle: string; labels: string[] }

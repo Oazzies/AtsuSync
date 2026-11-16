@@ -49,7 +49,10 @@ export class Watcher {
 
       if (this.atsu && link.atsuMangaId) {
         const state = await this.atsu.getSeriesState({ mangaId: link.atsuMangaId }).catch(() => null);
-        if (state?.found) this.links.skipChaptersOnAtsu(link.id, [...state.ranges, ...state.waiting]);
+        if (state) {
+          this.links.setAtsuState(link.id, state);
+          if (state.found) this.links.skipChaptersOnAtsu(link.id, [...state.ranges, ...state.waiting]);
+        }
       }
 
       this.links.markChecked(link.id, null);

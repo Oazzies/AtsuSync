@@ -5,13 +5,14 @@ import fastifyStatic from '@fastify/static';
 import type { ContentRequest, RequestComment, Settings, SettingsView } from '@atsusync/shared';
 import { AtsuClient, emptySeriesState } from './atsu/client.ts';
 import { RequestsRepo, syncRequests } from './atsu/requests.ts';
-import { getMangaBakaSeries } from './atsu/mangabaka.ts';
+import { checkMangaBakaForRequest, getMangaBakaSeries } from './atsu/mangabaka.ts';
 import { PresenceChecker, toRequestComment } from './atsu/presence.ts';
 import { openDb, type Db } from './db/client.ts';
 import { events } from './events.ts';
 import { LinksRepo } from './links.ts';
 import { SettingsStore } from './settings.ts';
 import { Discovery } from './sources/discovery.ts';
+import { mediumOf } from './sources/types.ts';
 import { SourceRegistry } from './sources/registry.ts';
 import { SourceHttp } from './sources/http.ts';
 import type { SourceAdapter } from './sources/types.ts';
@@ -121,6 +122,14 @@ export function buildApp(opts: AppOptions) {
     return atsu.getSeriesState(mangaId ? { mangaId } : { mangaBakaId: r.mangabakaId });
   });
   app.post<{ Params: { id: string } }>('/api/requests/:id/find-sources', async (req) => discovery.find(mustRequest(req.params.id)));
+  app.post<{ Params: { id: string } }>('/api/requests/:id/mangabaka', async (req) => {
+    const r = mustRequest(req.params.id);
+    const result = await checkMangaBakaForRequest(r, { force: true });
+    if (result.mangabaka && !result.mediumMismatch && String(result.mangabaka.id) !== r.mangabakaId) {
+      requests.setMangaBakaId(r.id, String(result.mangabaka.id));
+    }
+    return result;
+  });
   app.post<{ Params: { id: string }; Body: { url: string } }>('/api/requests/:id/add-source', async (req) =>
     discovery.addByUrl(mustRequest(req.params.id), req.body.url),
   );
@@ -143,8 +152,20 @@ export function buildApp(opts: AppOptions) {
   app.get('/api/links', async () => links.list());
   app.post<{ Body: { requestId: string; sourceId: string; seriesUrl: string } }>('/api/links', async (req) => {
     const r = mustRequest(req.body.requestId);
-    const atsuState = !r.atsuMangaId && r.mangabakaId ? await atsu.getSeriesState({ mangaBakaId: r.mangabakaId }).catch(() => null) : null;
-    return links.create({ ...req.body, atsuMangaId: r.atsuMangaId ?? atsuState?.mangaId ?? null, checkIntervalMin: settings.get().defaultCheckIntervalMin });
+    const presenceMangaId = r.presence?.verdict === 'on_atsu' ? r.presence.match?.mangaId : null;
+    const knownMangaId = r.atsuMangaId ?? presenceMangaId;
+    const atsuState = knownMangaId
+      ? await atsu.getSeriesState({ mangaId: knownMangaId }).catch(() => null)
+      : r.mangabakaId
+        ? await atsu.getSeriesState({ mangaBakaId: r.mangabakaId }).catch(() => null)
+        : null;
+    const link = await links.create({
+      ...req.body,
+      atsuMangaId: knownMangaId ?? atsuState?.mangaId ?? null,
+      checkIntervalMin: settings.get().defaultCheckIntervalMin,
+    });
+    if (atsuState) links.setAtsuState(link.id, atsuState);
+    return links.get(link.id)!;
   });
   app.get<{ Params: { id: string } }>('/api/links/:id', async (req) => {
     const link = links.get(Number(req.params.id));
@@ -152,8 +173,9 @@ export function buildApp(opts: AppOptions) {
     const r = requests.get(link.requestId);
     const ref = link.atsuMangaId ? { mangaId: link.atsuMangaId } : r?.mangabakaId ? { mangaBakaId: r.mangabakaId } : null;
     const atsuState = ref ? await atsu.getSeriesState(ref).catch((e) => ({ ...emptySeriesState(), error: String(e.message) })) : null;
-    if (atsuState?.found && atsuState.mangaId && !link.atsuMangaId) links.update(link.id, { atsuMangaId: atsuState.mangaId });
-    return { link: links.get(link.id), atsu: atsuState, chapters: links.chapters(link.id, atsuState ? [...atsuState.ranges, ...atsuState.waiting] : []) };
+    if (atsuState) links.setAtsuState(link.id, atsuState);
+    const mangabaka = r?.mangabakaId ? await getMangaBakaSeries(r.mangabakaId).catch(() => null) : null;
+    return { link: links.get(link.id), atsu: atsuState, mangabaka, chapters: links.chapters(link.id, atsuState ? [...atsuState.ranges, ...atsuState.waiting] : []) };
   });
   app.patch<{ Params: { id: string }; Body: { watch?: boolean; checkIntervalMin?: number; atsuMangaId?: string | null } }>(
     '/api/links/:id',
@@ -172,6 +194,48 @@ export function buildApp(opts: AppOptions) {
     const added = await watcher.check(link);
     return { added: added.length, link: links.get(link.id) };
   });
+  app.post<{ Body: { linkIds?: number[] } }>('/api/links/refresh-atsu', async (req) => {
+    const all = links.list();
+    const target = req.body?.linkIds?.length ? all.filter((l) => req.body.linkIds!.includes(l.id)) : all;
+    let updated = 0;
+    for (const link of target) {
+      const r = requests.get(link.requestId);
+      const ref = link.atsuMangaId ? { mangaId: link.atsuMangaId } : r?.mangabakaId ? { mangaBakaId: r.mangabakaId } : null;
+      if (!ref) continue;
+      const state = await atsu.getSeriesState(ref).catch(() => null);
+      if (state) {
+        links.setAtsuState(link.id, state);
+        if (state.found) links.skipChaptersOnAtsu(link.id, [...state.ranges, ...state.waiting]);
+        updated++;
+      }
+    }
+    return { updated, links: links.list() };
+  });
+  app.post<{ Body: { linkIds?: number[] } }>('/api/links/check-all', async (req) => {
+    const all = links.list();
+    const target = req.body?.linkIds?.length ? all.filter((l) => req.body.linkIds!.includes(l.id)) : all.filter((l) => l.watch);
+    let added = 0;
+    for (const link of target) {
+      const res = await watcher.check(link);
+      added += res.length;
+    }
+    return { checked: target.length, added };
+  });
+  app.post<{ Body: { ids: number[]; action: 'watch' | 'pause' | 'untrack' | 'check' } }>('/api/links/bulk', async (req) => {
+    const { ids, action } = req.body;
+    if (!Array.isArray(ids) || !ids.length) return { ok: true, count: 0 };
+    if (action === 'untrack') {
+      for (const id of ids) links.delete(id);
+    } else if (action === 'watch' || action === 'pause') {
+      for (const id of ids) links.update(id, { watch: action === 'watch' });
+    } else if (action === 'check') {
+      for (const id of ids) {
+        const link = links.get(id);
+        if (link) await watcher.check(link);
+      }
+    }
+    return { ok: true, count: ids.length };
+  });
   // Pull specific chapters from another site into an existing link (e.g. ones that are broken on the linked site).
   const sourceFor = (url: string) => {
     const adapter = sources.forUrl(url);
@@ -182,7 +246,8 @@ export function buildApp(opts: AppOptions) {
     const link = links.get(Number(req.params.id));
     if (!link) throw Object.assign(new Error('Link not found'), { statusCode: 404 });
     const q = (req.query.q || link.seriesTitle).trim();
-    const searchable = sources.enabled().filter((a) => a.search && a.id !== link.sourceId);
+    const linkMedium = mediumOf(sources.find(link.sourceId) ?? { medium: 'comic' });
+    const searchable = sources.enabled().filter((a) => a.search && a.id !== link.sourceId && mediumOf(a) === linkMedium);
     const results = await Promise.all(
       searchable.map(async (a) => {
         try {
@@ -207,12 +272,18 @@ export function buildApp(opts: AppOptions) {
       chapters: series.chapters.map((c) => ({ ...c, inLink: have.has(c.number) })),
     };
   });
-  app.post<{ Params: { id: string }; Body: { url: string; numbers: number[] } }>('/api/links/:id/fetch-from', async (req) => {
+  app.post<{ Params: { id: string }; Body: { url: string; numbers: number[]; urls?: Record<number, string> } }>('/api/links/:id/fetch-from', async (req) => {
     const link = links.get(Number(req.params.id));
     if (!link) throw Object.assign(new Error('Link not found'), { statusCode: 404 });
     const series = await sourceFor(req.body.url).getSeries(req.body.url, sources.http);
     const wanted = new Set(req.body.numbers);
-    const picked = series.chapters.filter((c) => wanted.has(c.number));
+    const picked = series.chapters
+      .filter((c) => wanted.has(c.number))
+      .map((c) => {
+        const overrideUrl = req.body.urls?.[c.number];
+        const alt = overrideUrl ? c.alternatives?.find((a) => a.url === overrideUrl) : undefined;
+        return alt ? { ...c, url: alt.url, label: alt.label ?? c.label, group: alt.group } : c;
+      });
     if (picked.length !== wanted.size) throw Object.assign(new Error('Some requested chapters are not on that site'), { statusCode: 400 });
     return pipeline.addFromSource(link.id, picked);
   });
@@ -220,6 +291,9 @@ export function buildApp(opts: AppOptions) {
     links.setChapterState(req.body.chapterIds, req.body.state);
     return { ok: true };
   });
+  app.post<{ Params: { id: string }; Body: { url: string } }>('/api/chapters/:id/source', async (req) =>
+    links.setChapterSource(Number(req.params.id), req.body.url),
+  );
 
   // ---- Downloads (chapter ZIPs the user uploads to atsu.moe by hand) ----
   app.get<{ Querystring: { linkId?: string } }>('/api/downloads', async (req) =>
@@ -230,6 +304,7 @@ export function buildApp(opts: AppOptions) {
     if (!req.query.linkId) throw Object.assign(new Error('linkId is required'), { statusCode: 400 });
     return pipeline.clear(Number(req.query.linkId));
   });
+  app.delete<{ Params: { id: string } }>('/api/downloads/:id', async (req) => pipeline.remove(Number(req.params.id)));
   app.post<{ Params: { id: string } }>('/api/downloads/:id/retry', async (req) => {
     pipeline.retry(Number(req.params.id));
     return pipeline.get(Number(req.params.id));

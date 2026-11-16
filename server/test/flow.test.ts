@@ -123,6 +123,42 @@ describe('download pipeline', () => {
     expect(zip.includes(Buffer.from('002.webp'))).toBe(true);
   });
 
+  it('skips an empty/invalid page instead of failing the whole chapter download', async () => {
+    const emptyPageSite: SourceAdapter = {
+      id: 'partial',
+      name: 'Partial Scans',
+      baseUrl: 'https://partial.test',
+      kind: 'aggregator',
+      hosts: ['partial.test'],
+      rateLimit: { rpm: 6000, concurrency: 4 },
+      getSeries: async (url) => ({ title: 'Heart Aching', url, altTitles: [], chapters: [{ number: 1, label: 'Chapter 1', url: 'https://partial.test/heart-1', locked: false }] }),
+      getChapterPages: async () => [
+        { url: 'https://other.test/img/1.jpg', name: '001.jpg' },
+        { url: 'https://other.test/img/2.jpg', name: '002.jpg' },
+        { url: 'https://other.test/img/3.jpg', name: '003.jpg' },
+      ],
+    };
+    const t = setup({ extra: [emptyPageSite] });
+    close = () => t.app.close();
+    const origBytes = t.sources.http.bytes.bind(t.sources.http);
+    t.sources.http.bytes = async (url, opts) =>
+      url.endsWith('/2.jpg') ? { bytes: new Uint8Array(0), contentType: 'image/jpeg' } : origBytes(url, opts);
+
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'partial', seriesUrl: 'https://partial.test/s/heart', checkIntervalMin: 60 });
+    const [c1] = t.links.chapters(link.id);
+    t.pipeline.enqueue([c1!.id]);
+    const [job] = await waitForJobs(t.pipeline);
+
+    expect(job).toMatchObject({ state: 'done', progress: 3, total: 3 });
+    expect(job!.log.join('\n')).toContain('Page 002.jpg is not a valid image (0 bytes)');
+    expect(job!.log.join('\n')).toContain('Saved 2 pages (1 skipped)');
+    const zip = readFileSync(t.pipeline.file(job!.id)!.path);
+    expect(zip.readUInt16LE(zip.length - 12)).toBe(2);
+    expect(zip.includes(Buffer.from('001.jpg'))).toBe(true);
+    expect(zip.includes(Buffer.from('002.jpg'))).toBe(false);
+    expect(zip.includes(Buffer.from('003.jpg'))).toBe(true);
+  });
+
   it('downloads a chapter from another site onto a link without linking that site', async () => {
     const other: SourceAdapter = {
       id: 'other',
@@ -167,6 +203,27 @@ describe('download pipeline', () => {
     expect(t.pipeline.list({ linkId: link.id })).toEqual([]);
     expect(files.every((f) => !existsSync(f))).toBe(true);
     expect(t.links.chapters(link.id).map((c) => c.state)).toEqual(['known', 'uploaded']);
+  });
+
+  it('deleting a single download job removes it and its ZIP while preserving uploaded state', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
+    const [c1, c2] = t.links.chapters(link.id);
+
+    t.pipeline.enqueue([c1!.id, c2!.id]);
+    const jobs = await waitForJobs(t.pipeline);
+    const job1 = jobs.find((j) => j.chapterId === c1!.id)!;
+    const job2 = jobs.find((j) => j.chapterId === c2!.id)!;
+    const file1 = t.pipeline.file(job1.id)!.path;
+
+    await t.app.inject({ method: 'POST', url: '/api/chapters/state', payload: { chapterIds: [c1!.id], state: 'uploaded' } });
+    const del = await t.app.inject({ method: 'DELETE', url: `/api/downloads/${job1.id}` });
+    expect(del.statusCode).toBe(200);
+    expect(JSON.parse(del.payload)).toEqual({ jobs: 1, files: 1 });
+    expect(existsSync(file1)).toBe(false);
+    expect(t.pipeline.list({ linkId: link.id }).map((j) => j.id)).toEqual([job2.id]);
+    expect(t.links.chapters(link.id).map((c) => c.state)).toEqual(['uploaded', 'downloaded']);
   });
 
   it('builds a chapter from uploaded images: preview, strip joining, ZIP, and clean-up', async () => {
@@ -218,7 +275,7 @@ describe('download pipeline', () => {
     close = () => t.app.close();
     const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
     const seen: string[] = [];
-    const off = events.onEvent((e) => e.type !== 'job' && e.type !== 'requests_synced' && seen.push(`${e.type}:${e.labels.join(',')}`));
+    const off = events.onEvent((e) => (e.type === 'new_chapters' || e.type === 'chapters_unlocked') && seen.push(`${e.type}:${e.labels.join(',')}`));
 
     t.chapters.current = [ch(1), ch(2), ch(3, true)];
     expect(await t.watcher.check(t.links.get(link.id)!)).toHaveLength(0);
@@ -246,6 +303,22 @@ describe('download pipeline', () => {
     expect(job!.state).toBe('failed');
     expect(t.pipeline.file(job!.id)).toBeNull();
     expect(t.links.chapters(link.id).find((c) => c.id === pending.id)!.state).toBe('pending');
+  });
+
+  it('fails a queued job whose source no longer exists instead of re-running it forever', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    const link = await t.links.create({ requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart', checkIntervalMin: 60 });
+    const [c1] = t.links.chapters(link.id);
+    // Both lookups fail, as when a source adapter is deleted: by the chapter URL's host, then by the link's source id.
+    t.db.prepare('UPDATE links SET source_id = ? WHERE id = ?').run('removed', link.id);
+    t.db.prepare('UPDATE source_chapters SET url = ? WHERE id = ?').run('https://removed.test/s/heart/1', c1!.id);
+
+    t.pipeline.enqueue([c1!.id]);
+    const [job] = await waitForJobs(t.pipeline);
+
+    expect(job).toMatchObject({ state: 'failed', error: 'Unknown source removed' });
+    expect(t.links.chapters(link.id)[0]!.state).not.toBe('queued');
   });
 
   it('refuses locked chapters', async () => {
@@ -290,5 +363,53 @@ describe('existing Atsumaru series', () => {
     t.pipeline.enqueue([t.links.chapters(link.id)[0]!.id]);
     const [job] = await waitForJobs(t.pipeline);
     expect(job!.uploadUrl).toBe('https://atsu.moe/upload?manga=YwMX0');
+  });
+});
+
+describe('tracked links', () => {
+  it('tracks missing chapters against Atsumaru coverage and supports refresh, bulk pause/watch, and untrack', async () => {
+    const t = setup();
+    close = () => t.app.close();
+    let coverage = { out: [[1, 1]] as [number, number][], waiting: [] as [number, number][], total: 1 };
+    (t.atsu as any).fetchImpl = async (input: string | URL) => {
+      if (new URL(String(input)).pathname === '/api/uploads/series') {
+        return new Response(
+          JSON.stringify({
+            series: { mangaId: 'M1', mangaBakaId: '1', title: 'Heart Aching' },
+            coverage,
+            sources: [],
+            elsewhere: [],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response('{}', { status: 200 });
+    };
+
+    const created = await t.app.inject({
+      method: 'POST',
+      url: '/api/links',
+      payload: { requestId: 'REQ1', sourceId: 'fake', seriesUrl: 'https://fake.test/s/heart' },
+    });
+    expect(created.statusCode).toBe(200);
+    const link = created.json();
+    expect(link).toMatchObject({ atsuMangaId: 'M1', atsuTotal: 1, missingCount: 1 });
+
+    // Now Atsu has all 2 chapters; refresh-atsu updates missingCount to 0.
+    coverage = { out: [[1, 2]], waiting: [], total: 2 };
+    const refreshed = await t.app.inject({ method: 'POST', url: '/api/links/refresh-atsu', payload: {} });
+    expect(refreshed.statusCode).toBe(200);
+    expect(refreshed.json().updated).toBe(1);
+    expect(t.links.get(link.id)).toMatchObject({ atsuTotal: 2, missingCount: 0 });
+
+    // Bulk pause & resume.
+    await t.app.inject({ method: 'POST', url: '/api/links/bulk', payload: { ids: [link.id], action: 'pause' } });
+    expect(t.links.get(link.id)!.watch).toBe(false);
+    await t.app.inject({ method: 'POST', url: '/api/links/bulk', payload: { ids: [link.id], action: 'watch' } });
+    expect(t.links.get(link.id)!.watch).toBe(true);
+
+    // Bulk untrack removes the link.
+    await t.app.inject({ method: 'POST', url: '/api/links/bulk', payload: { ids: [link.id], action: 'untrack' } });
+    expect(t.links.get(link.id)).toBeNull();
   });
 });
