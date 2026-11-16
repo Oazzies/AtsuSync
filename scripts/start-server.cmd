@@ -8,6 +8,8 @@ echo [AtsuSync] Building extension...
 call npm run build || goto :err
 echo [AtsuSync] Starting server...
 call npm start
+if errorlevel 1 goto :err
+exit
 :err
 echo.
 echo [AtsuSync] Server stopped or exited with an error.
